@@ -1,6 +1,6 @@
-# Parmesan
+. # Parmesan
 
-Mischievous tools and hybrid workflows for immersive and 360° visual effects.
+Mischievous tools and hybrid AI workflows for visual effects artists.
 
 ## Status
 
