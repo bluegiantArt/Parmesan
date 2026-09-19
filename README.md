@@ -36,7 +36,7 @@ parmesan/
 python_panels/
   parmesan.pypanel   panel registration, path injected at install
 install.py      copies the panel into Houdini's prefs
-tests/          51 tests, no Houdini required
+tests/          89 tests, no Houdini required
 ```
 
 Observation and decision are split on purpose: `sync.observe()` does the
