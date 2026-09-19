@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <pythonPanelDocument>
-  <interface name="parmesan" label="Parmesan" icon="MISC_python">
+  <!-- Installed by install.py, which injects this repo's path into the script
+ below so the panel imports parmesan without any environment setup. -->
+  <interface name="parmesan" label="Parmesan" icon="MISC_python" help_url="">
     <script><![CDATA[
-# Installed by install.py, which injects the repo path below this line so the
-# panel works without editing houdini.env first.
 # PARMESAN_PATH_INJECTION
 
 def onCreateInterface():
@@ -15,5 +15,23 @@ def onCreateInterface():
     importlib.reload(parmesan.panel)
     return parmesan.panel.create()
 ]]></script>
+    <includeInPaneTabMenu menu_position="300" create_separator="false"/>
+    <includeInToolbarMenu menu_position="300" create_separator="false"/>
+    <help><![CDATA[
+Parmesan surfaces the parameters that matter from a whole Houdini graph onto
+one control node, without taking the graph hostage.
+
+1. Select a node and press Create New to make a CONTROLS null.
+2. Press Scan Graph and Build Panel. Every node under the scan root is read,
+   every parameter ranked, and the best ones surfaced - grouped into one
+   folder per source node.
+3. Press Show Controls to bring the sliders up in the Parameters pane. That
+   is where the controls live; this panel is the machinery around them.
+4. Press Refresh after changing something in the graph directly. The button
+   shows how many things need attention.
+
+The graph stays master: node parms own every value, and removing a control
+never changes anything in the graph.
+]]></help>
   </interface>
 </pythonPanelDocument>

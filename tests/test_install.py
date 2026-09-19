@@ -48,6 +48,23 @@ class PanelFileGeneration(unittest.TestCase):
         script = ET.fromstring(self.target_text()).find("interface/script").text
         self.assertIn("def onCreateInterface()", script)
 
+    def test_registers_in_the_pane_tab_menu(self):
+        # Without this element the interface still exists, but only inside a
+        # Python Panel pane's own dropdown -- it never appears under
+        # New Pane Tab Type, which is where anyone will look for it first.
+        iface = ET.fromstring(self.target_text()).find("interface")
+        self.assertIsNotNone(
+            iface.find("includeInPaneTabMenu"),
+            "panel would not appear in Houdini's New Pane Tab Type menu",
+        )
+
+    def test_menu_entries_carry_a_position(self):
+        iface = ET.fromstring(self.target_text()).find("interface")
+        for tag in ("includeInPaneTabMenu", "includeInToolbarMenu"):
+            element = iface.find(tag)
+            self.assertIsNotNone(element, f"{tag} missing")
+            self.assertTrue(element.get("menu_position"), f"{tag} has no position")
+
     def test_marker_is_replaced_not_merely_appended(self):
         text = self.target_text()
         self.assertNotIn(install.INJECTION_MARKER, text)
