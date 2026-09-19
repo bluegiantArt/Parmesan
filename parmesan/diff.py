@@ -51,6 +51,40 @@ NEEDS_ATTENTION = frozenset(
 )
 
 
+#: What each kind is called in the UI. The enum names are for code; an artist
+#: reading a refresh list needs to know what happened and what to do, so the
+#: wording is stated as cause plus consequence rather than as a status word.
+KIND_LABELS = {
+    ChangeKind.IN_SYNC: "Up to date",
+    ChangeKind.PULL: "Changed in the graph",
+    ChangeKind.PUSH: "Changed in the panel",
+    ChangeKind.DIVERGED: "Changed in both places",
+    ChangeKind.ORPHANED: "Source node is gone",
+    ChangeKind.DANGLING: "Control was deleted",
+    ChangeKind.TYPE_CHANGED: "Parameter type changed",
+    ChangeKind.NEW_CANDIDATE: "Suggested",
+}
+
+#: The action offered for each kind, phrased as what will happen if applied.
+KIND_ACTIONS = {
+    ChangeKind.PULL: "Update the panel to match",
+    ChangeKind.PUSH: "Write the panel value to the graph",
+    ChangeKind.DIVERGED: "Choose which value wins",
+    ChangeKind.ORPHANED: "Remove this control",
+    ChangeKind.DANGLING: "Rebuild or remove this control",
+    ChangeKind.TYPE_CHANGED: "Remove and re-add this control",
+    ChangeKind.NEW_CANDIDATE: "Add as a control",
+}
+
+
+def human_kind(kind: "ChangeKind") -> str:
+    return KIND_LABELS.get(kind, kind.value)
+
+
+def human_action(kind: "ChangeKind") -> str:
+    return KIND_ACTIONS.get(kind, "")
+
+
 @dataclass
 class Change:
     kind: ChangeKind

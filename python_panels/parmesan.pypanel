@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<pythonPanelDocument>
+  <interface name="parmesan" label="Parmesan" icon="MISC_python">
+    <script><![CDATA[
+# Installed by install.py, which injects the repo path below this line so the
+# panel works without editing houdini.env first.
+# PARMESAN_PATH_INJECTION
+
+def onCreateInterface():
+    import importlib
+    import parmesan.panel
+
+    # Reload on every open so editing a source file and reopening the panel
+    # shows the change, instead of needing a Houdini restart.
+    importlib.reload(parmesan.panel)
+    return parmesan.panel.create()
+]]></script>
+  </interface>
+</pythonPanelDocument>
