@@ -1,7 +1,6 @@
 # parmesan
 
-Surface the parameters that matter from any Houdini graph, without taking
-the graph hostage.
+Surface the most used parameters that matter from any Houdini graph into a single panel. 
 
 ## Model
 
@@ -13,8 +12,7 @@ it always did. The panel is a generated view over them:
 | Panel -> graph | Python parm callback writes through | On edit, immediately |
 | Graph -> panel | Refresh re-reads and diffs | On demand |
 
-No channel references are ever written onto source parms. That is the whole
-design, and two things follow from it:
+No channel references are ever written onto source parms. That is the design, and two things follow from it:
 
 1. **Source parms stay editable.** You can still open the node and work
    normally — the promise the tool exists to keep.
