@@ -25,7 +25,7 @@ except ImportError:  # pragma: no cover - older Houdini
     from PySide2 import QtCore, QtGui, QtWidgets
 
 from . import diff as diffmod
-from . import promote, sync
+from . import promote, scan, scoring, sync
 from .manifest import Manifest
 
 try:
@@ -51,7 +51,7 @@ def create():
     import importlib
 
     from . import callbacks, manifest
-    for module in (manifest, diffmod, callbacks, sync, promote):
+    for module in (manifest, diffmod, scoring, callbacks, sync, promote, scan):
         importlib.reload(module)
     return ParmesanPanel()
 
@@ -60,69 +60,58 @@ def create():
 # add-parameters dialog
 # --------------------------------------------------------------------------
 
-class AddParmsDialog(QtWidgets.QDialog):
-    """Tick the parameters to surface, from the currently selected nodes.
+class CandidateDialog(QtWidgets.QDialog):
+    """Review the parameters about to be surfaced, grouped by their node.
 
-    Edited parms sort first and are marked, because "I changed this one" is
-    the signal that usually means "this is the one I want on the panel".
+    Used for both a graph scan and a manual add. Rows sit under a per-node
+    heading, because a flat list gives no sense of which knobs belong together
+    and "Height" is meaningless without knowing whose height it is.
     """
 
-    def __init__(self, candidates: List[Dict], parent=None):
+    def __init__(
+        self,
+        candidates: List[Dict],
+        parent=None,
+        title: str = "Add Parameters",
+        precheck: bool = False,
+        show_scores: bool = False,
+    ):
         super().__init__(parent)
-        self.setWindowTitle("Add Parameters")
-        self.resize(560, 460)
+        self.setWindowTitle(title)
+        self.resize(720, 540)
         self._candidates = candidates
+        self._show_scores = show_scores
 
         layout = QtWidgets.QVBoxLayout(self)
 
         self.filter_edit = QtWidgets.QLineEdit()
-        self.filter_edit.setPlaceholderText("Filter by name...")
+        self.filter_edit.setPlaceholderText("Filter by parameter or node name...")
         self.filter_edit.textChanged.connect(self._apply_filter)
         layout.addWidget(self.filter_edit)
 
         self.tree = QtWidgets.QTreeWidget()
-        self.tree.setHeaderLabels(["Parameter", "Node", "Value", ""])
-        self.tree.setRootIsDecorated(False)
+        self.tree.setHeaderLabels(["Parameter", "Value", "Score", "Why"])
         self.tree.setAlternatingRowColors(True)
+        self.tree.setUniformRowHeights(True)
+        self.tree.setColumnHidden(2, not show_scores)
         layout.addWidget(self.tree, 1)
 
-        for cand in candidates:
-            item = QtWidgets.QTreeWidgetItem(
-                [
-                    cand["parm_label"] or cand["source_parm"],
-                    cand["node_name"],
-                    _short(cand["value"]),
-                    "edited" if cand["edited"] else "",
-                ]
-            )
-            item.setFlags(item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(0, UNCHECKED)
-            item.setData(0, QtCore.Qt.ItemDataRole.UserRole, cand)
-            if cand["edited"]:
-                font = item.font(0)
-                font.setBold(True)
-                item.setFont(0, font)
-            self.tree.addTopLevelItem(item)
-        for col in range(4):
-            self.tree.resizeColumnToContents(col)
+        self._populate(precheck)
 
         row = QtWidgets.QHBoxLayout()
-        edited_btn = QtWidgets.QPushButton("Check All Edited")
-        edited_btn.setToolTip("Tick every parameter whose value differs from its default")
-        edited_btn.clicked.connect(self._check_edited)
-        row.addWidget(edited_btn)
+        all_btn = QtWidgets.QPushButton("Check All")
+        all_btn.clicked.connect(lambda: self._set_all(CHECKED))
+        row.addWidget(all_btn)
         none_btn = QtWidgets.QPushButton("Check None")
-        none_btn.clicked.connect(self._check_none)
+        none_btn.clicked.connect(lambda: self._set_all(UNCHECKED))
         row.addWidget(none_btn)
+        if not precheck:
+            edited_btn = QtWidgets.QPushButton("Check All Edited")
+            edited_btn.setToolTip("Tick every parameter whose value differs from its default")
+            edited_btn.clicked.connect(self._check_edited)
+            row.addWidget(edited_btn)
         row.addStretch(1)
         layout.addLayout(row)
-
-        folder_row = QtWidgets.QHBoxLayout()
-        folder_row.addWidget(QtWidgets.QLabel("Put in folder:"))
-        self.folder_edit = QtWidgets.QLineEdit()
-        self.folder_edit.setPlaceholderText("(none)")
-        folder_row.addWidget(self.folder_edit, 1)
-        layout.addLayout(folder_row)
 
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.StandardButton.Ok
@@ -132,34 +121,81 @@ class AddParmsDialog(QtWidgets.QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+    # ---- rows ---------------------------------------------------------
+
+    def _populate(self, precheck: bool) -> None:
+        self.tree.clear()
+        for node_label, group in _group_by_node(self._candidates):
+            parent = QtWidgets.QTreeWidgetItem([node_label, "", "", ""])
+            font = parent.font(0)
+            font.setBold(True)
+            parent.setFont(0, font)
+            parent.setFirstColumnSpanned(False)
+            parent.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled)
+            self.tree.addTopLevelItem(parent)
+
+            for cand in group:
+                item = QtWidgets.QTreeWidgetItem(
+                    [
+                        cand.get("parm_label") or cand.get("source_parm", ""),
+                        _short(cand.get("value")),
+                        f"{cand.get('score', 0):g}" if self._show_scores else "",
+                        cand.get("why") or ("edited" if cand.get("edited") else ""),
+                    ]
+                )
+                item.setFlags(
+                    QtCore.Qt.ItemFlag.ItemIsEnabled
+                    | QtCore.Qt.ItemFlag.ItemIsSelectable
+                    | QtCore.Qt.ItemFlag.ItemIsUserCheckable
+                )
+                item.setCheckState(0, CHECKED if precheck else UNCHECKED)
+                item.setData(0, QtCore.Qt.ItemDataRole.UserRole, cand)
+                if cand.get("edited"):
+                    item_font = item.font(0)
+                    item_font.setBold(True)
+                    item.setFont(0, item_font)
+                parent.addChild(item)
+            parent.setExpanded(True)
+        for col in range(4):
+            self.tree.resizeColumnToContents(col)
+
+    def _rows(self):
+        for i in range(self.tree.topLevelItemCount()):
+            parent = self.tree.topLevelItem(i)
+            for j in range(parent.childCount()):
+                yield parent, parent.child(j)
+
+    # ---- actions ------------------------------------------------------
+
     def _apply_filter(self, text: str) -> None:
         needle = text.strip().lower()
-        for i in range(self.tree.topLevelItemCount()):
-            item = self.tree.topLevelItem(i)
-            haystack = f"{item.text(0)} {item.text(1)}".lower()
+        for parent, item in self._rows():
+            haystack = f"{item.text(0)} {parent.text(0)}".lower()
             item.setHidden(bool(needle) and needle not in haystack)
+        # Hide a node heading whose every parm was filtered away.
+        for i in range(self.tree.topLevelItemCount()):
+            parent = self.tree.topLevelItem(i)
+            visible = any(
+                not parent.child(j).isHidden() for j in range(parent.childCount())
+            )
+            parent.setHidden(not visible)
+
+    def _set_all(self, state) -> None:
+        for _, item in self._rows():
+            item.setCheckState(0, state)
 
     def _check_edited(self) -> None:
-        for i in range(self.tree.topLevelItemCount()):
-            item = self.tree.topLevelItem(i)
+        for _, item in self._rows():
             cand = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
-            if cand and cand["edited"]:
+            if cand and cand.get("edited"):
                 item.setCheckState(0, CHECKED)
 
-    def _check_none(self) -> None:
-        for i in range(self.tree.topLevelItemCount()):
-            self.tree.topLevelItem(i).setCheckState(0, UNCHECKED)
-
     def chosen(self) -> List[Dict]:
-        out = []
-        for i in range(self.tree.topLevelItemCount()):
-            item = self.tree.topLevelItem(i)
-            if item.checkState(0) == CHECKED:
-                out.append(item.data(0, QtCore.Qt.ItemDataRole.UserRole))
-        return out
-
-    def folder(self) -> str:
-        return self.folder_edit.text().strip()
+        return [
+            item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+            for _, item in self._rows()
+            if item.checkState(0) == CHECKED
+        ]
 
 
 # --------------------------------------------------------------------------
@@ -213,26 +249,78 @@ class ParmesanPanel(QtWidgets.QWidget):
         row.addWidget(new_btn)
         return row
 
-    def _build_toolbar(self) -> QtWidgets.QHBoxLayout:
-        row = QtWidgets.QHBoxLayout()
+    def _build_toolbar(self) -> QtWidgets.QVBoxLayout:
+        outer = QtWidgets.QVBoxLayout()
 
-        self.add_btn = QtWidgets.QPushButton("Add Parameters...")
-        self.add_btn.setToolTip("Surface parameters from the selected node(s)")
+        # The headline action. One press reads the whole graph, ranks every
+        # parameter in it, and builds the panel -- no node-by-node hunting,
+        # which is the entire reason this tool exists.
+        scan_row = QtWidgets.QHBoxLayout()
+        self.scan_btn = QtWidgets.QPushButton("Scan Graph and Build Panel")
+        self.scan_btn.setToolTip(
+            "Read every node under the scan root, rank the parameters, and\n"
+            "surface the most important ones grouped by node."
+        )
+        font = self.scan_btn.font()
+        font.setBold(True)
+        self.scan_btn.setFont(font)
+        self.scan_btn.clicked.connect(self.on_scan)
+        scan_row.addWidget(self.scan_btn, 1)
+
+        scan_row.addWidget(QtWidgets.QLabel("How many:"))
+        self.count_spin = QtWidgets.QSpinBox()
+        self.count_spin.setRange(1, 200)
+        self.count_spin.setValue(scoring.DEFAULT_LIMIT)
+        self.count_spin.setToolTip("How many controls to surface")
+        scan_row.addWidget(self.count_spin)
+
+        self.review_check = QtWidgets.QCheckBox("Review first")
+        self.review_check.setToolTip(
+            "Show what the scan picked before adding it.\n"
+            "Off by default: one press should give you a working panel."
+        )
+        scan_row.addWidget(self.review_check)
+        outer.addLayout(scan_row)
+
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(QtWidgets.QLabel("Scan from:"))
+        self.root_edit = QtWidgets.QLineEdit()
+        self.root_edit.setPlaceholderText("(the control node's network)")
+        self.root_edit.setToolTip(
+            "Which part of the scene to scan. Blank means the network the\n"
+            "control node lives in."
+        )
+        row.addWidget(self.root_edit, 1)
+        root_btn = QtWidgets.QPushButton("Set from Selection")
+        root_btn.clicked.connect(self.on_set_root)
+        row.addWidget(root_btn)
+        outer.addLayout(row)
+
+        row2 = QtWidgets.QHBoxLayout()
+        self.add_btn = QtWidgets.QPushButton("Add Manually...")
+        self.add_btn.setToolTip(
+            "Fallback: pick parameters yourself from the selected node(s),\n"
+            "for when the scan misses something."
+        )
         self.add_btn.clicked.connect(self.on_add)
-        row.addWidget(self.add_btn)
+        row2.addWidget(self.add_btn)
 
         self.parms_btn = QtWidgets.QPushButton("Show Controls")
-        self.parms_btn.setToolTip("Open the control node's parameters, where the sliders live")
+        self.parms_btn.setToolTip(
+            "Make the control node current so its sliders appear in the\n"
+            "Parameters pane -- that is where the controls actually live."
+        )
         self.parms_btn.clicked.connect(self.on_show_parms)
-        row.addWidget(self.parms_btn)
+        row2.addWidget(self.parms_btn)
 
-        row.addStretch(1)
+        row2.addStretch(1)
 
         self.refresh_btn = QtWidgets.QPushButton("Refresh")
         self.refresh_btn.setToolTip("Re-read the graph and list what changed")
         self.refresh_btn.clicked.connect(self.on_refresh)
-        row.addWidget(self.refresh_btn)
-        return row
+        row2.addWidget(self.refresh_btn)
+        outer.addLayout(row2)
+        return outer
 
     def _build_changes_group(self) -> QtWidgets.QGroupBox:
         group = QtWidgets.QGroupBox("Needs review")
@@ -263,8 +351,7 @@ class ParmesanPanel(QtWidgets.QWidget):
         layout = QtWidgets.QVBoxLayout(group)
 
         self.controls_tree = QtWidgets.QTreeWidget()
-        self.controls_tree.setHeaderLabels(["Control", "Drives", "Folder", "Type"])
-        self.controls_tree.setRootIsDecorated(False)
+        self.controls_tree.setHeaderLabels(["Control", "Parameter", "Type", "Why"])
         self.controls_tree.setAlternatingRowColors(True)
         self.controls_tree.setSelectionMode(
             QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
@@ -331,6 +418,78 @@ class ParmesanPanel(QtWidgets.QWidget):
 
     # ---- actions ------------------------------------------------------
 
+    def on_set_root(self) -> None:
+        nodes = hou.selectedNodes()
+        if not nodes:
+            self._say("Select the network or node to scan from, then press this.")
+            return
+        self.root_edit.setText(nodes[0].path())
+        self._say(f"Scanning from {nodes[0].path()}")
+
+    def _scan_root(self, node):
+        """Resolve the scan root: whatever was typed, else the control node's
+        own network."""
+        typed = self.root_edit.text().strip()
+        if not typed:
+            return scan.default_root(node)
+        root = hou.node(typed)
+        if root is None:
+            self._say(f"No such network: {typed}")
+        return root
+
+    def on_scan(self) -> None:
+        """The headline action: read the graph, rank it, build the panel."""
+        node = self._need_node()
+        if node is None:
+            return
+        root = self._scan_root(node)
+        if root is None:
+            return
+
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
+        try:
+            ranked, report = scan.propose(
+                node, root=root, limit=self.count_spin.value()
+            )
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+
+        if not ranked:
+            self._say(
+                f"{report.summary()}, but nothing scored high enough. "
+                "Try editing a few parameters first, or use Add Manually."
+            )
+            return
+
+        chosen = ranked
+        if self.review_check.isChecked():
+            dialog = CandidateDialog(
+                ranked,
+                self,
+                title="Scan Results",
+                precheck=True,
+                show_scores=True,
+            )
+            if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+                self._say("Scan cancelled; nothing was added.")
+                return
+            chosen = dialog.chosen()
+            if not chosen:
+                self._say("Nothing was ticked.")
+                return
+
+        with hou.undos.group("Parmesan scan graph"):
+            added, problems = promote.promote_candidates(node, chosen)
+
+        self.reload()
+        self._say(
+            _join(
+                f"Surfaced {len(added)} of {scoring.summarize(ranked)}. "
+                f"{report.summary()}.",
+                problems + report.errors,
+            )
+        )
+
     def on_add(self) -> None:
         node = self._need_node()
         if node is None:
@@ -348,7 +507,7 @@ class ParmesanPanel(QtWidgets.QWidget):
             self._say("Nothing on those nodes can be surfaced, or it all already is.")
             return
 
-        dialog = AddParmsDialog(candidates, self)
+        dialog = CandidateDialog(candidates, self, title="Add Parameters")
         if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return
         chosen = dialog.chosen()
@@ -356,17 +515,8 @@ class ParmesanPanel(QtWidgets.QWidget):
             self._say("Nothing was ticked.")
             return
 
-        parms = []
-        for cand in chosen:
-            source_node = hou.node(cand["node_path"])
-            if source_node is None:
-                continue
-            parm = source_node.parm(cand["source_parm"])
-            if parm is not None:
-                parms.append(parm)
-
         with hou.undos.group("Parmesan add parameters"):
-            added, problems = promote.promote(node, parms, folder=dialog.folder())
+            added, problems = promote.promote_candidates(node, chosen)
         self.reload()
         self._say(_join(f"Added {len(added)}.", problems))
 
@@ -547,19 +697,45 @@ class ParmesanPanel(QtWidgets.QWidget):
             self.changes_tree.resizeColumnToContents(col)
 
     def _fill_controls(self) -> None:
+        """Group surfaced controls under their source node, mirroring the
+        folders generated on the control node itself. The panel and the real
+        parameter interface should never disagree about what belongs where."""
         self.controls_tree.clear()
+
+        groups: Dict[str, List] = {}
+        order: Dict[str, int] = {}
         for entry in sorted(self._manifest.entries, key=lambda e: e.order):
-            drives = entry.source_path_hint or "(moved)"
-            item = QtWidgets.QTreeWidgetItem(
-                [
-                    entry.display_label(),
-                    f"{drives} - {entry.source_parm}",
-                    entry.folder or "",
-                    entry.parm_type,
-                ]
+            heading = entry.folder or entry.source_path_hint or "(ungrouped)"
+            groups.setdefault(heading, []).append(entry)
+            order.setdefault(heading, entry.order)
+
+        for heading in sorted(groups, key=lambda h: order[h]):
+            entries = groups[heading]
+            parent = QtWidgets.QTreeWidgetItem(
+                [heading, f"{len(entries)} control(s)", "", ""]
             )
-            item.setData(0, QtCore.Qt.ItemDataRole.UserRole, entry.id)
-            self.controls_tree.addTopLevelItem(item)
+            font = parent.font(0)
+            font.setBold(True)
+            parent.setFont(0, font)
+            hint = entries[0].source_path_hint
+            if hint:
+                parent.setToolTip(0, hint)
+            self.controls_tree.addTopLevelItem(parent)
+
+            for entry in entries:
+                item = QtWidgets.QTreeWidgetItem(
+                    [
+                        entry.display_label(),
+                        entry.source_parm,
+                        entry.parm_type,
+                        entry.why,
+                    ]
+                )
+                item.setData(0, QtCore.Qt.ItemDataRole.UserRole, entry.id)
+                if entry.source_path_hint:
+                    item.setToolTip(0, f"{entry.source_path_hint} / {entry.source_parm}")
+                parent.addChild(item)
+            parent.setExpanded(True)
         for col in range(4):
             self.controls_tree.resizeColumnToContents(col)
 
@@ -591,10 +767,43 @@ class ParmesanPanel(QtWidgets.QWidget):
         return out
 
     def _selected_entry_ids(self) -> List[str]:
-        return [
-            item.data(0, QtCore.Qt.ItemDataRole.UserRole)
-            for item in self.controls_tree.selectedItems()
-        ]
+        """Entry ids for the selected rows.
+
+        Node headings carry no id, so selecting a whole group yields its
+        children rather than nothing -- "remove that node's controls" is the
+        obvious reading of clicking a node heading and pressing Remove.
+        """
+        ids: List[str] = []
+        for item in self.controls_tree.selectedItems():
+            own = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+            if own:
+                ids.append(own)
+                continue
+            for i in range(item.childCount()):
+                child_id = item.child(i).data(0, QtCore.Qt.ItemDataRole.UserRole)
+                if child_id:
+                    ids.append(child_id)
+        # Preserve order while dropping duplicates from overlapping selections.
+        return list(dict.fromkeys(ids))
+
+
+def _group_by_node(candidates: List[Dict]):
+    """Group candidates under a node heading, keeping the order they arrive in.
+
+    Rank order is meaningful after a scan -- the best-scoring node's group
+    should sit at the top -- so this does not sort, it only clusters.
+    """
+    headings: List[str] = []
+    groups: Dict[str, List[Dict]] = {}
+    for cand in candidates:
+        name = cand.get("node_name") or "?"
+        path = cand.get("node_path") or ""
+        heading = f"{name}   {path}" if path else name
+        if heading not in groups:
+            groups[heading] = []
+            headings.append(heading)
+        groups[heading].append(cand)
+    return [(heading, groups[heading]) for heading in headings]
 
 
 def _short(value, limit: int = 28) -> str:

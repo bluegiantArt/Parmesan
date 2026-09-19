@@ -148,8 +148,15 @@ def build_interface(node, manifest: Manifest, specs: Optional[Dict[str, Dict]] =
     for entry in sorted(manifest.entries, key=lambda e: e.order):
         by_folder.setdefault(entry.folder or "", []).append(entry)
 
-    # Unfoldered controls first, then named folders alphabetically.
-    for folder_name in sorted(by_folder, key=lambda f: (f != "", f)):
+    # Unfoldered controls first, then folders in the order their contents were
+    # surfaced. After a scan that means best-scoring node first, which is more
+    # use than alphabetical -- the artist wants the important group on top, not
+    # the one whose node name starts with "a".
+    def folder_rank(name: str):
+        entries = by_folder[name]
+        return (name != "", min(e.order for e in entries))
+
+    for folder_name in sorted(by_folder, key=folder_rank):
         entries = by_folder[folder_name]
         templates = []
         for entry in entries:

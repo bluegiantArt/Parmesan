@@ -29,6 +29,8 @@ design, and two things follow from it:
 parmesan/
   manifest.py   schema + persistence   (pure Python)
   diff.py       reconciliation engine + UI wording   (pure Python)
+  scoring.py    the ranking heuristic  (pure Python)
+  scan.py       walks the graph gathering evidence    (needs hou)
   callbacks.py  parm templates + generated callback   (needs hou)
   sync.py       observe / write-through / apply       (needs hou)
   promote.py    add + remove + rename controls        (needs hou)
@@ -68,24 +70,58 @@ start raises a `hou.NodeError` naming the problem rather than failing silently.
 ## Using the panel
 
 The panel is the machinery; **the sliders are not in it.** They are spare parms
-on the control node, so they live in Houdini's own parameter editor where you
-already work, and they keep working when the panel is closed.
+on the control node, so they render as an ordinary Houdini parameter interface
+in the Parameters pane, and they keep working when the panel is closed.
 
 1. Select a node in the network editor and press **Create New** — that makes a
    `CONTROLS` null to hang controls on. (**Use Selected** adopts an existing
    one instead.)
-2. Select the node whose parameters you want and press **Add Parameters**.
-   Parameters you have edited sort to the top and are shown in bold, since a
-   value that differs from its default is the strongest hint it matters.
-3. **Show Controls** makes the control node current so its sliders appear in
+2. Press **Scan Graph and Build Panel**. That reads every node under the scan
+   root, ranks every parameter in it, and surfaces the best ones — grouped into
+   one collapsible folder per source node, so it is always obvious which node a
+   knob came from. No node-by-node hunting; that is the point of the tool.
+3. **Show Controls** makes the control node current so the sliders appear in
    the Parameters pane. Dragging one writes straight down into the graph.
-4. Change something on the source node directly, then press **Refresh**. The
+4. Change something on a source node directly, then press **Refresh**. The
    count on the button is how many things need your attention. Rows say what
    happened in plain words; **Apply Checked** acts on them. Conflicts ask once
    which side wins rather than guessing.
 
-Removing a control never touches the graph — the value stays exactly where it
+**Scan from** limits the scan; blank means the network the control node lives
+in, which is usually what you want. **How many** sets the panel size.
+**Review first** shows the ranking before anything is added — off by default,
+because one press should give a working panel.
+
+Every surfaced control records *why* it was chosen, shown in the panel's list.
+If the ranking picks badly, that column is the diagnostic: it says which signal
+misfired. **Add Manually** is the fallback when the scan misses something, and
+removing a control never touches the graph — the value stays exactly where it
 was, which is the point of the whole design.
+
+## How the ranking works
+
+`scoring.py` is pure Python and every weight in it is a named constant meant to
+be argued with. The premise is that **a parameter that has been touched is a
+parameter that matters**, so `isAtDefault()` carries the most weight and
+everything else corroborates:
+
+| Signal | Why it counts |
+|---|---|
+| Edited (not at default) | The artist changed it. The primary evidence. |
+| Animated | Changed over time, not just once. |
+| Referenced by other parms | Literally the most-used knobs in the graph. |
+| Node renamed from its default | Renaming is an act of authorship. |
+| On the display node | What the artist is currently looking at. |
+| Knob-like name | `height`, `scale`, `seed` — art direction, not plumbing. |
+| Look-defining node type | `mountain`, `scatter`, `polyextrude`. |
+| Locked / greyed out | Negative: a control that cannot do anything. |
+| Plumbing name or type | Negative: `vexpression`, `group`, `merge`, `file`. |
+
+The fan-out cap sits deliberately below the edited weight, so no amount of
+corroboration outranks direct evidence. An unknown node type scores zero rather
+than being penalised, so a graph of custom HDAs falls back to evidence instead
+of being punished for being unrecognised. And no single node may take more than
+`DEFAULT_MAX_PER_NODE` slots, so one over-tweaked node cannot fill the panel.
 
 ## Tests
 
@@ -149,16 +185,22 @@ on them:
   the panel parm and the graph write. Test it; if the panel parm's own
   change lands outside the group, the grouping needs rethinking.
 - **`allSubChildren(recurse_in_locked_nodes=False)`** — confirm the kwarg
-  name on your build.
+  name on your build. `scan.walk()` falls back to the positional form.
+- **`parm.parmsReferencingThis()`** — the fan-out signal depends on it, and on
+  it being fast enough to call for every promising parm in a large graph.
+- **Scan speed.** If a scan of a production graph is slow, the two-tier
+  gathering in `scan._scan_node()` is the thing to tighten.
 - **`hou.NodeError`** — confirm it is the right exception class to raise
   from a parm callback for a legible error.
 
 ## Not built yet
 
-- **The scoring pass.** `diff.compute()` accepts `candidates` but nothing
-  produces them. That is the heuristic ranking — `isAtDefault()`, keyframes,
-  expression references, graph position, node type, hidden/disabled flags —
-  and it is the next piece.
+- **Graph position as a signal.** Depth in the chain and downstream fan-out
+  would both sharpen the ranking, but both cost a walk per parm; the current
+  scan deliberately stops at signals it can read cheaply.
+- **Tuning against real scenes.** Every weight in `scoring.py` was reasoned
+  about, not measured. They need a production graph and an artist disagreeing
+  with the results.
 - **Staleness detection.** `node.addEventCallback` to light up the badge
   without a manual scan.
 - **Ramps and multiparms.** `build_parm_template()` raises on these rather

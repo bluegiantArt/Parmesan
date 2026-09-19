@@ -55,6 +55,7 @@ class Entry:
     parm_type: str = ""           # "float" | "int" | "toggle" | "string" | "ramp"
     last_synced: Any = None       # watermark, NOT the value of record
     score: float = 0.0
+    why: str = ""                 # why scoring surfaced this, in plain words
     pinned: bool = False          # user explicitly kept this; never auto-drop
 
     def display_label(self) -> str:

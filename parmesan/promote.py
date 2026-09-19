@@ -182,15 +182,52 @@ def candidates_on(node, manifest: Optional[Manifest] = None) -> List[Dict[str, A
 # promote / unpromote
 # --------------------------------------------------------------------------
 
-def promote(panel_node, parms: Iterable, folder: str = "") -> Tuple[List[Entry], List[str]]:
+def folder_for_node(node) -> str:
+    """The folder a node's controls are grouped under.
+
+    Grouping by node is not decoration: a flat list of forty sliders drawn from
+    a dozen nodes is unreadable, and "Height" means nothing without knowing
+    whose height it is. The node name is the folder label, so provenance is
+    visible without hovering anything.
+    """
+    _require_hou()
+    return node.name()
+
+
+def _make_entry(manifest: Manifest, parm, folder: str, score: float, why: str) -> Entry:
+    """Build one manifest entry for a source parm. Caller has already checked
+    that it is promotable and not already bound."""
+    node = parm.node()
+    return Entry(
+        gui_parm=manifest.unique_gui_name(f"{node.name()}_{parm.name()}"),
+        source_uuid=sync.stamp(node),
+        source_parm=parm.name(),
+        index=parm.componentIndex(),
+        source_path_hint=node.path(),
+        label=compose_label(node.name(), parm.description()),
+        folder=folder,
+        order=manifest.next_order(),
+        parm_type=sync.parm_kind(parm),
+        last_synced=parm.eval(),
+        score=score,
+        why=why,
+    )
+
+
+def promote(
+    panel_node,
+    parms: Iterable,
+    folder: str = "",
+    group_by_node: bool = True,
+) -> Tuple[List[Entry], List[str]]:
     """Surface ``parms`` on ``panel_node``. Returns (added, problems).
 
     Idempotent per (node, parm, component): promoting something twice is a
-    no-op rather than a duplicate control.
+    no-op rather than a duplicate control. With ``group_by_node`` and no
+    explicit ``folder``, each source node gets its own folder.
     """
     _require_hou()
     manifest = sync.load_manifest(panel_node)
-    root = sync._search_root(panel_node)
     added: List[Entry] = []
     problems: List[str] = []
 
@@ -204,21 +241,61 @@ def promote(panel_node, parms: Iterable, folder: str = "") -> Tuple[List[Entry],
             continue
 
         token = sync.stamp(node)
-        key = (token, parm.name(), parm.componentIndex())
-        if key in manifest.bound_keys():
+        if (token, parm.name(), parm.componentIndex()) in manifest.bound_keys():
             continue
 
-        entry = Entry(
-            gui_parm=manifest.unique_gui_name(f"{node.name()}_{parm.name()}"),
-            source_uuid=token,
-            source_parm=parm.name(),
-            index=parm.componentIndex(),
-            source_path_hint=node.path(),
-            label=compose_label(node.name(), parm.description()),
-            folder=folder,
-            order=manifest.next_order(),
-            parm_type=sync.parm_kind(parm),
-            last_synced=parm.eval(),
+        where = folder or (folder_for_node(node) if group_by_node else "")
+        entry = _make_entry(manifest, parm, where, 0.0, "")
+        manifest.entries.append(entry)
+        added.append(entry)
+
+    if added:
+        sync.save_manifest(panel_node, manifest)
+        rebuild(panel_node, manifest)
+    return added, problems
+
+
+def promote_candidates(
+    panel_node,
+    candidates: Iterable[dict],
+    folder: str = "",
+    group_by_node: bool = True,
+) -> Tuple[List[Entry], List[str]]:
+    """Surface ranked candidates from a scan. Returns (added, problems).
+
+    Takes the plain dicts the scan produces rather than hou.Parm objects, so
+    the scoring pass never has to hand live Houdini handles across a dialog --
+    the artist may delete a node while the review window is open.
+    """
+    _require_hou()
+    manifest = sync.load_manifest(panel_node)
+    added: List[Entry] = []
+    problems: List[str] = []
+
+    for candidate in candidates:
+        node = hou.node(candidate.get("node_path", ""))
+        if node is None:
+            problems.append(f"{candidate.get('label', '?')}: node no longer exists")
+            continue
+        if node.path() == panel_node.path():
+            continue
+
+        parm = node.parm(candidate.get("source_parm", ""))
+        if parm is None or not is_promotable(parm):
+            problems.append(f"{candidate.get('label', '?')}: parameter is gone")
+            continue
+
+        token = sync.stamp(node)
+        if (token, parm.name(), parm.componentIndex()) in manifest.bound_keys():
+            continue
+
+        where = folder or (folder_for_node(node) if group_by_node else "")
+        entry = _make_entry(
+            manifest,
+            parm,
+            where,
+            float(candidate.get("score", 0.0) or 0.0),
+            str(candidate.get("why", "") or ""),
         )
         manifest.entries.append(entry)
         added.append(entry)
