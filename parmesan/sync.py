@@ -191,6 +191,48 @@ def on_gui_parm_changed(kwargs: Dict[str, Any]) -> None:
     save_manifest(node, manifest)
 
 
+def write_through(panel_node, manifest: Manifest, entry: Entry, value) -> Optional[str]:
+    """Write a panel-side edit down to the source parm. Returns a problem, or
+    None on success.
+
+    Shared by the generated parm callback and the panel's own widgets, so
+    there is exactly one path that writes to the graph and exactly one place
+    where the watermark is advanced.
+    """
+    root = _search_root(panel_node)
+    source_node = resolve_source(entry, root)
+    source_parm = _parm_of(source_node, entry)
+    if source_parm is None:
+        return f"{entry.display_label()}: source node is gone"
+    if source_parm.isLocked():
+        return f"{entry.display_label()}: locked on {source_node.path()}"
+
+    with hou.undos.group(f"Set {entry.display_label()}"):
+        # An expression on the target is replaced by a direct value, which is
+        # what dragging its slider in Houdini does too. It is inside the undo
+        # group, so one Ctrl+Z puts the expression back.
+        try:
+            source_parm.deleteAllKeyframes()
+        except (AttributeError, hou.OperationFailed):
+            pass
+        source_parm.set(value)
+
+    entry.last_synced = value
+    entry.source_path_hint = source_node.path()
+
+    # Keep the control node's spare parm in step, so the native parameter
+    # view and the panel never disagree about what the value is.
+    gui_parm = panel_node.parm(entry.gui_parm)
+    if gui_parm is not None:
+        try:
+            gui_parm.set(value)
+        except hou.OperationFailed:
+            pass
+
+    save_manifest(panel_node, manifest)
+    return None
+
+
 def _search_root(panel_node):
     """Where to look for source nodes. The panel's parent covers the common
     case of a panel living alongside the graph it drives; falling back to

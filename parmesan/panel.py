@@ -25,7 +25,7 @@ except ImportError:  # pragma: no cover - older Houdini
     from PySide2 import QtCore, QtGui, QtWidgets
 
 from . import diff as diffmod
-from . import promote, scan, scoring, sync
+from . import promote, scan, scoring, sync, widgets
 from .manifest import Manifest
 
 try:
@@ -51,7 +51,9 @@ def create():
     import importlib
 
     from . import callbacks, manifest
-    for module in (manifest, diffmod, scoring, callbacks, sync, promote, scan):
+    for module in (
+        manifest, diffmod, scoring, callbacks, sync, promote, scan, widgets
+    ):
         importlib.reload(module)
     return ParmesanPanel()
 
@@ -222,8 +224,16 @@ class ParmesanPanel(QtWidgets.QWidget):
 
         outer.addLayout(self._build_node_row())
         outer.addLayout(self._build_toolbar())
-        outer.addWidget(self._build_changes_group(), 1)
-        outer.addWidget(self._build_controls_group(), 1)
+
+        # The controls are the point of the panel, so they get the space and
+        # the top position. Review only appears when there is something to
+        # review -- an empty table above the actual controls was the first
+        # thing anyone asked about.
+        outer.addWidget(self._build_controls_group(), 3)
+
+        self.changes_group = self._build_changes_group()
+        self.changes_group.setVisible(False)
+        outer.addWidget(self.changes_group, 1)
 
         self.status = QtWidgets.QLabel("")
         self.status.setWordWrap(True)
@@ -244,7 +254,11 @@ class ParmesanPanel(QtWidgets.QWidget):
         row.addWidget(use_btn)
 
         new_btn = QtWidgets.QPushButton("Create New")
-        new_btn.setToolTip("Make a new null named CONTROLS beside the selected node")
+        new_btn.setToolTip(
+            "Make a new null named CONTROLS to hang controls on.\n"
+            "Goes in the selected node's network, or the network you are\n"
+            "looking at if nothing is selected."
+        )
         new_btn.clicked.connect(self.on_create_node)
         row.addWidget(new_btn)
         return row
@@ -323,7 +337,9 @@ class ParmesanPanel(QtWidgets.QWidget):
         return outer
 
     def _build_changes_group(self) -> QtWidgets.QGroupBox:
-        group = QtWidgets.QGroupBox("Needs review")
+        group = QtWidgets.QGroupBox(
+            "Changed in the graph since you last looked - needs review"
+        )
         layout = QtWidgets.QVBoxLayout(group)
 
         self.changes_tree = QtWidgets.QTreeWidget()
@@ -347,31 +363,20 @@ class ParmesanPanel(QtWidgets.QWidget):
         return group
 
     def _build_controls_group(self) -> QtWidgets.QGroupBox:
-        group = QtWidgets.QGroupBox("Surfaced controls")
+        group = QtWidgets.QGroupBox("Controls")
         layout = QtWidgets.QVBoxLayout(group)
+        layout.setContentsMargins(4, 4, 4, 4)
 
-        self.controls_tree = QtWidgets.QTreeWidget()
-        self.controls_tree.setHeaderLabels(["Control", "Parameter", "Type", "Why"])
-        self.controls_tree.setAlternatingRowColors(True)
-        self.controls_tree.setSelectionMode(
-            QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
+        self.controls = widgets.ControlsView()
+        self.controls.edited.connect(self.on_control_edited)
+        self.controls.contextRequested.connect(self.on_control_menu)
+        layout.addWidget(self.controls, 1)
+
+        hint = QtWidgets.QLabel(
+            "Right-click a control's name to rename it, jump to its node, or remove it."
         )
-        self.controls_tree.itemDoubleClicked.connect(lambda *_: self.on_rename())
-        layout.addWidget(self.controls_tree, 1)
-
-        row = QtWidgets.QHBoxLayout()
-        rename_btn = QtWidgets.QPushButton("Rename")
-        rename_btn.clicked.connect(self.on_rename)
-        row.addWidget(rename_btn)
-        jump_btn = QtWidgets.QPushButton("Select Source Node")
-        jump_btn.clicked.connect(self.on_jump)
-        row.addWidget(jump_btn)
-        row.addStretch(1)
-        remove_btn = QtWidgets.QPushButton("Remove")
-        remove_btn.setToolTip("Remove the control. The graph value is left untouched.")
-        remove_btn.clicked.connect(self.on_remove)
-        row.addWidget(remove_btn)
-        layout.addLayout(row)
+        hint.setStyleSheet("color: palette(mid);")
+        layout.addWidget(hint)
         return group
 
     # ---- node binding -------------------------------------------------
@@ -401,20 +406,35 @@ class ParmesanPanel(QtWidgets.QWidget):
         self.reload()
         self._say(f"Using {self._node_path}")
 
+    def _current_network(self):
+        """The network the artist is looking at.
+
+        Used when nothing is selected. Requiring a selection purely to decide
+        where to put a null is busywork, and it invites the misreading that
+        the selected node is what gets scanned -- it is not.
+        """
+        try:
+            editor = hou.ui.paneTabOfType(hou.paneTabType.NetworkEditor)
+            if editor is not None:
+                return editor.pwd()
+        except (AttributeError, hou.OperationFailed):
+            pass
+        return hou.node("/obj")
+
     def on_create_node(self) -> None:
         nodes = hou.selectedNodes()
-        if not nodes:
-            self._say("Select a node first -- the new control node is made beside it.")
+        parent = nodes[0].parent() if nodes else self._current_network()
+        if parent is None:
+            self._say("Could not work out which network to build the control node in.")
             return
-        parent = nodes[0].parent()
         try:
             node = promote.create_control_node(parent)
         except hou.OperationFailed as exc:
-            self._say(f"Could not create the node: {exc}")
+            self._say(f"Could not create a control node in {parent.path()}: {exc}")
             return
         self._node_path = node.path()
         self.reload()
-        self._say(f"Created {self._node_path}")
+        self._say(f"Created {self._node_path}. Scan will read all of {parent.path()}.")
 
     # ---- actions ------------------------------------------------------
 
@@ -578,28 +598,62 @@ class ParmesanPanel(QtWidgets.QWidget):
         self.on_refresh()
         self._say(_join(f"Applied {applied}.", problems))
 
-    def on_remove(self) -> None:
-        node = self._need_node()
+    def on_control_edited(self, entry_id: str, value) -> None:
+        """A control in the panel was moved: write it down into the graph."""
+        node = self.node()
         if node is None:
             return
-        ids = self._selected_entry_ids()
-        if not ids:
-            self._say("Select one or more controls to remove.")
+        entry = self._manifest.by_id(entry_id)
+        if entry is None:
+            return
+        problem = sync.write_through(node, self._manifest, entry, value)
+        if problem:
+            self._say(problem)
+            return
+        self._say(f"{entry.display_label()} = {_short(value)}")
+
+    def on_control_menu(self, entry_id: str, global_pos) -> None:
+        """Per-control actions, on the control's own label."""
+        entry = self._manifest.by_id(entry_id)
+        if entry is None:
+            return
+        menu = QtWidgets.QMenu(self)
+        rename_action = menu.addAction("Rename...")
+        jump_action = menu.addAction("Select Source Node")
+        menu.addSeparator()
+        remove_action = menu.addAction("Remove Control")
+        remove_group_action = None
+        if entry.folder:
+            remove_group_action = menu.addAction(f"Remove All From {entry.folder}")
+
+        chosen = menu.exec(global_pos)
+        if chosen is None:
+            return
+        if chosen is rename_action:
+            self.on_rename(entry_id)
+        elif chosen is jump_action:
+            self.on_jump(entry_id)
+        elif chosen is remove_action:
+            self.on_remove([entry_id])
+        elif remove_group_action is not None and chosen is remove_group_action:
+            self.on_remove(
+                [e.id for e in self._manifest.entries if e.folder == entry.folder]
+            )
+
+    def on_remove(self, entry_ids: List[str]) -> None:
+        node = self._need_node()
+        if node is None or not entry_ids:
             return
         with hou.undos.group("Parmesan remove controls"):
-            removed = promote.unpromote(node, ids)
+            removed = promote.unpromote(node, entry_ids)
         self.reload()
         self._say(f"Removed {removed}. Graph values were left alone.")
 
-    def on_rename(self) -> None:
+    def on_rename(self, entry_id: str) -> None:
         node = self._need_node()
         if node is None:
             return
-        ids = self._selected_entry_ids()
-        if len(ids) != 1:
-            self._say("Select exactly one control to rename.")
-            return
-        entry = self._manifest.by_id(ids[0])
+        entry = self._manifest.by_id(entry_id)
         if entry is None:
             return
         text, ok = QtWidgets.QInputDialog.getText(
@@ -612,15 +666,11 @@ class ParmesanPanel(QtWidgets.QWidget):
         self.reload()
         self._say(f"Renamed to {text.strip() or entry.label!r}.")
 
-    def on_jump(self) -> None:
+    def on_jump(self, entry_id: str) -> None:
         node = self._need_node()
         if node is None:
             return
-        ids = self._selected_entry_ids()
-        if not ids:
-            self._say("Select a control first.")
-            return
-        entry = self._manifest.by_id(ids[0])
+        entry = self._manifest.by_id(entry_id)
         if entry is None:
             return
         source = sync.resolve_source(entry, sync._search_root(node))
@@ -654,7 +704,7 @@ class ParmesanPanel(QtWidgets.QWidget):
             self._manifest = Manifest()
             self._result = None
             self.changes_tree.clear()
-            self.controls_tree.clear()
+            self._fill_controls()
             self._update_badge()
             if self._node_path:
                 self._say(f"{self._node_path} no longer exists.")
@@ -697,51 +747,52 @@ class ParmesanPanel(QtWidgets.QWidget):
             self.changes_tree.resizeColumnToContents(col)
 
     def _fill_controls(self) -> None:
-        """Group surfaced controls under their source node, mirroring the
-        folders generated on the control node itself. The panel and the real
-        parameter interface should never disagree about what belongs where."""
-        self.controls_tree.clear()
-
-        groups: Dict[str, List] = {}
-        order: Dict[str, int] = {}
-        for entry in sorted(self._manifest.entries, key=lambda e: e.order):
-            heading = entry.folder or entry.source_path_hint or "(ungrouped)"
-            groups.setdefault(heading, []).append(entry)
-            order.setdefault(heading, entry.order)
-
-        for heading in sorted(groups, key=lambda h: order[h]):
-            entries = groups[heading]
-            parent = QtWidgets.QTreeWidgetItem(
-                [heading, f"{len(entries)} control(s)", "", ""]
+        """Draw the actual controls, grouped by source node."""
+        node = self.node()
+        if node is None:
+            self.controls.show_message(
+                "No control node yet.\n\n"
+                "Press Create New to make one, then Scan Graph to fill it."
             )
-            font = parent.font(0)
-            font.setBold(True)
-            parent.setFont(0, font)
-            hint = entries[0].source_path_hint
-            if hint:
-                parent.setToolTip(0, hint)
-            self.controls_tree.addTopLevelItem(parent)
+            return
+        if not self._manifest.entries:
+            self.controls.show_message(
+                "Nothing surfaced yet.\n\n"
+                "Press Scan Graph and Build Panel."
+            )
+            return
 
-            for entry in entries:
-                item = QtWidgets.QTreeWidgetItem(
-                    [
-                        entry.display_label(),
-                        entry.source_parm,
-                        entry.parm_type,
-                        entry.why,
-                    ]
-                )
-                item.setData(0, QtCore.Qt.ItemDataRole.UserRole, entry.id)
-                if entry.source_path_hint:
-                    item.setToolTip(0, f"{entry.source_path_hint} / {entry.source_parm}")
-                parent.addChild(item)
-            parent.setExpanded(True)
-        for col in range(4):
-            self.controls_tree.resizeColumnToContents(col)
+        rows = promote.live_rows(node, self._manifest)
+
+        groups: List[Dict] = []
+        by_heading: Dict[str, Dict] = {}
+        for row in rows:
+            heading = row["folder"] or row["node_name"] or "(ungrouped)"
+            group = by_heading.get(heading)
+            if group is None:
+                group = {
+                    "title": heading,
+                    "subtitle": row["node_path"],
+                    "rows": [],
+                }
+                by_heading[heading] = group
+                groups.append(group)
+            group["rows"].append(row)
+
+        drawn = self.controls.build(groups)
+        if drawn == 0:
+            self.controls.show_message(
+                "Nothing here can be drawn as a control. "
+                "Try Scan Graph again, or Add Manually."
+            )
 
     def _update_badge(self) -> None:
         count = self._result.badge_count if self._result else 0
         self.refresh_btn.setText(f"Refresh ({count})" if count else "Refresh")
+        # The review table only earns screen space when it has something on it.
+        self.changes_group.setVisible(
+            bool(self._result and self._result.actionable)
+        )
 
     # ---- small helpers ------------------------------------------------
 
@@ -766,25 +817,6 @@ class ParmesanPanel(QtWidgets.QWidget):
                 out.append(item.data(0, QtCore.Qt.ItemDataRole.UserRole))
         return out
 
-    def _selected_entry_ids(self) -> List[str]:
-        """Entry ids for the selected rows.
-
-        Node headings carry no id, so selecting a whole group yields its
-        children rather than nothing -- "remove that node's controls" is the
-        obvious reading of clicking a node heading and pressing Remove.
-        """
-        ids: List[str] = []
-        for item in self.controls_tree.selectedItems():
-            own = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
-            if own:
-                ids.append(own)
-                continue
-            for i in range(item.childCount()):
-                child_id = item.child(i).data(0, QtCore.Qt.ItemDataRole.UserRole)
-                if child_id:
-                    ids.append(child_id)
-        # Preserve order while dropping duplicates from overlapping selections.
-        return list(dict.fromkeys(ids))
 
 
 def _group_by_node(candidates: List[Dict]):

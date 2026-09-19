@@ -141,8 +141,13 @@ def describe_candidate(parm) -> Dict[str, Any]:
         edited = not parm.isAtDefault()
     except Exception:  # noqa: BLE001
         edited = False
+    # isTimeDependent(), not keyframes(): Houdini stores an expression as a
+    # channel with a keyframe in it, so keyframes() is truthy for anything
+    # expression-driven. In a sim graph that is most parms, which made
+    # "animated" fire on everything and stop discriminating. Time dependence
+    # is the thing actually meant by animated.
     try:
-        animated = bool(parm.keyframes())
+        animated = bool(parm.isTimeDependent())
     except Exception:  # noqa: BLE001
         animated = False
     return {
@@ -359,6 +364,61 @@ def rebuild(panel_node, manifest: Optional[Manifest] = None):
             continue
     sync.save_manifest(panel_node, manifest)
     return ptg
+
+
+def live_rows(panel_node, manifest: Manifest) -> List[dict]:
+    """Current state of every surfaced control, for drawing the panel.
+
+    Reads the source parm, not the generated spare parm: the graph is master,
+    so the panel should show what the graph actually holds even if the spare
+    parm has drifted.
+    """
+    _require_hou()
+    root = sync._search_root(panel_node)
+    index = sync.build_stamp_index(root)
+    rows: List[dict] = []
+
+    for entry in sorted(manifest.entries, key=lambda e: e.order):
+        source_node = sync.resolve_source(entry, root, index)
+        source_parm = sync._parm_of(source_node, entry)
+
+        row = {
+            "entry_id": entry.id,
+            "label": entry.display_label(),
+            "parm_type": entry.parm_type,
+            "folder": entry.folder,
+            "order": entry.order,
+            "node_path": entry.source_path_hint,
+            "node_name": entry.folder or "",
+            "value": entry.last_synced,
+            "spec": {},
+            "expression": "",
+            "missing": source_parm is None,
+            "tooltip": "",
+        }
+
+        if source_parm is not None:
+            row["node_path"] = source_node.path()
+            row["node_name"] = source_node.name()
+            row["spec"] = spec_for(source_parm)
+            try:
+                row["value"] = source_parm.eval()
+            except hou.OperationFailed:
+                pass
+            try:
+                row["expression"] = source_parm.expression()
+            except hou.OperationFailed:
+                row["expression"] = ""
+            row["tooltip"] = f"{source_node.path()} / {entry.source_parm}"
+            if entry.why:
+                row["tooltip"] += f"\nSurfaced because: {entry.why}"
+        else:
+            row["tooltip"] = (
+                f"Source is missing (was {entry.source_path_hint or '?'})"
+            )
+
+        rows.append(row)
+    return rows
 
 
 def create_control_node(parent, name: str = "CONTROLS"):
