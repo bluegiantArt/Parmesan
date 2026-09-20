@@ -203,6 +203,63 @@ def update(url: str = REPO_ZIP, verbose: bool = True) -> List[str]:
     return report
 
 
+def update_from(path: str, verbose: bool = True) -> List[str]:
+    """Update from a ZIP or folder already on this machine.
+
+        import install; install.update_from(r"C:\\Users\\you\\Downloads\\Parmesan-main.zip")
+
+    For machines that cannot reach GitHub. Accepts either the downloaded ZIP
+    or an already-unzipped folder, and works out the nesting itself -- GitHub
+    wraps everything in a ``Parmesan-main`` folder, which is the step that
+    otherwise ends with people copying the wrapper in by mistake and creating
+    ``parmesan/parmesan/``.
+
+    Files land in this same folder, so the installed panel keeps working and
+    no second copy of the tool appears.
+    """
+    report: List[str] = []
+
+    def say(line: str) -> None:
+        report.append(line)
+        if verbose:
+            print(line)
+
+    path = os.path.expanduser(path.strip().strip('"').strip("'"))
+    if not os.path.exists(path):
+        say(f"FAIL Nothing found at {path}")
+        return report
+
+    say(f"Updating {REPO_ROOT}")
+    say(f"    from {path}")
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            if os.path.isdir(path):
+                source = _archive_root(path) or path
+            else:
+                extracted = os.path.join(tmp, "extracted")
+                with zipfile.ZipFile(path) as handle:
+                    _safe_extract(handle, extracted)
+                source = _archive_root(extracted)
+
+            if source is None or not os.path.exists(os.path.join(source, "install.py")):
+                say("FAIL That does not look like a Parmesan download.")
+                say("     Expected a folder or ZIP containing install.py and parmesan/.")
+                return report
+            if os.path.abspath(source) == os.path.abspath(REPO_ROOT):
+                say("FAIL That is this same folder; nothing to copy.")
+                return report
+
+            for name in _copy_over(source, REPO_ROOT):
+                say(f"  updated {name}")
+    except (OSError, zipfile.BadZipFile, ValueError) as exc:
+        say(f"FAIL Could not update: {exc}")
+        return report
+
+    say("")
+    say("Next: close and reopen the Parmesan panel to load the new code.")
+    return report
+
+
 def _safe_extract(handle: zipfile.ZipFile, destination: str) -> None:
     """Extract, refusing entries that would escape the destination.
 

@@ -213,6 +213,72 @@ class Updating(unittest.TestCase):
         install._copy_over(root, dest)
         self.assertTrue(os.path.exists(precious))
 
+    def fake_repo(self):
+        """Stand in for the installed folder: the code as it already is, plus
+        a user file beside it that an update must not touch."""
+        root = os.path.join(self.tmp, "Parmesan-main3")
+        os.makedirs(os.path.join(root, "parmesan"), exist_ok=True)
+        with open(os.path.join(root, "install.py"), "w") as handle:
+            handle.write("# installed\n")
+        with open(os.path.join(root, "my_scene.hip"), "w") as handle:
+            handle.write("precious\n")
+        return root
+
+    def run_update_from(self, path):
+        """update_from() writes to REPO_ROOT, so point that at a scratch dir."""
+        root = self.fake_repo()
+        original = install.REPO_ROOT
+        install.REPO_ROOT = root
+        try:
+            return root, install.update_from(path, verbose=False)
+        finally:
+            install.REPO_ROOT = original
+
+    def test_update_from_a_zip(self):
+        root, report = self.run_update_from(self.make_archive())
+        self.assertTrue(os.path.exists(os.path.join(root, "parmesan", "panel.py")))
+        self.assertTrue(any("Next:" in line for line in report))
+
+    def test_update_from_an_unzipped_folder(self):
+        source = os.path.join(self.tmp, "src", "Parmesan-main")
+        self.make_archive()  # also leaves the folder on disk
+        root, _ = self.run_update_from(source)
+        self.assertTrue(os.path.exists(os.path.join(root, "parmesan", "panel.py")))
+
+    def test_the_github_wrapper_folder_is_not_copied_in(self):
+        # Copying the wrapper by hand is how people end up with
+        # Parmesan-main3/Parmesan-main/parmesan/.
+        root, _ = self.run_update_from(self.make_archive())
+        self.assertFalse(os.path.exists(os.path.join(root, "Parmesan-main")))
+
+    def test_a_path_wrapped_in_quotes_still_works(self):
+        # Windows "Copy as path" hands you the path with quotes around it.
+        archive = self.make_archive()
+        root, report = self.run_update_from(f'"{archive}"')
+        self.assertTrue(os.path.exists(os.path.join(root, "parmesan", "panel.py")))
+
+    def test_a_missing_path_fails_clearly(self):
+        _, report = self.run_update_from(os.path.join(self.tmp, "nope.zip"))
+        self.assertTrue(report[0].startswith("FAIL"))
+
+    def test_updating_from_itself_is_refused(self):
+        root = self.fake_repo()
+        original = install.REPO_ROOT
+        install.REPO_ROOT = root
+        try:
+            report = install.update_from(root, verbose=False)
+        finally:
+            install.REPO_ROOT = original
+        self.assertTrue(any("same folder" in line for line in report))
+
+    def test_something_that_is_not_parmesan_is_refused(self):
+        junk = os.path.join(self.tmp, "junk")
+        os.makedirs(junk)
+        with open(os.path.join(junk, "readme.txt"), "w") as handle:
+            handle.write("not parmesan\n")
+        _, report = self.run_update_from(junk)
+        self.assertTrue(any("does not look like" in line for line in report))
+
     def test_an_archive_escaping_its_destination_is_refused(self):
         import zipfile
 
