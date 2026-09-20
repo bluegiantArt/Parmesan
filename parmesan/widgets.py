@@ -235,32 +235,45 @@ def build_editor(parm_type: str, value, spec: Optional[Dict[str, Any]] = None):
 # --------------------------------------------------------------------------
 
 class CollapsibleGroup(QtWidgets.QWidget):
-    """A node's controls under a clickable header.
+    """A level of the graph hierarchy under a clickable header.
 
-    One group per source node, which is what makes provenance obvious without
-    repeating the node name on every single row.
+    Groups nest, so a subnet inside a network reads as a subnet inside a
+    network rather than as two unrelated headings. Top-level groups start
+    closed: the first thing an artist should see is a short list of places,
+    not three hundred sliders.
     """
 
-    def __init__(self, title: str, subtitle: str = "", parent=None):
+    def __init__(
+        self,
+        title: str,
+        subtitle: str = "",
+        count: int = 0,
+        depth: int = 0,
+        expanded: bool = True,
+        parent=None,
+    ):
         super().__init__(parent)
+        self.depth = depth
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
         self.header = QtWidgets.QToolButton()
-        self.header.setText(title)
+        label = f"{title}    {count}" if count else title
+        self.header.setText(label)
         self.header.setCheckable(True)
-        self.header.setChecked(True)
+        self.header.setChecked(expanded)
         self.header.setToolButtonStyle(
             QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon
         )
-        self.header.setArrowType(QtCore.Qt.ArrowType.DownArrow)
         self.header.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
         font = self.header.font()
-        font.setBold(True)
+        # Only the outermost level is bold; nesting is carried by indentation,
+        # and everything shouting at once reads as nothing being important.
+        font.setBold(depth == 0)
         self.header.setFont(font)
         if subtitle:
             self.header.setToolTip(subtitle)
@@ -268,17 +281,13 @@ class CollapsibleGroup(QtWidgets.QWidget):
         outer.addWidget(self.header)
 
         self.body = QtWidgets.QWidget()
-        self.form = QtWidgets.QFormLayout(self.body)
-        self.form.setContentsMargins(16, 4, 4, 8)
-        self.form.setSpacing(4)
-        # Right-aligned labels, matching Houdini's parameter layout.
-        self.form.setLabelAlignment(
-            QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter
-        )
-        self.form.setFieldGrowthPolicy(
-            QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
-        )
+        self.body_layout = QtWidgets.QVBoxLayout(self.body)
+        self.body_layout.setContentsMargins(14, 2, 0, 4)
+        self.body_layout.setSpacing(2)
         outer.addWidget(self.body)
+
+        self.form: Optional[QtWidgets.QFormLayout] = None
+        self._on_toggled(expanded)
 
     def _on_toggled(self, expanded: bool) -> None:
         self.body.setVisible(expanded)
@@ -286,8 +295,29 @@ class CollapsibleGroup(QtWidgets.QWidget):
             QtCore.Qt.ArrowType.DownArrow if expanded else QtCore.Qt.ArrowType.RightArrow
         )
 
+    def _ensure_form(self) -> QtWidgets.QFormLayout:
+        """The parm rows live in a form, created only if this level has any."""
+        if self.form is None:
+            holder = QtWidgets.QWidget()
+            self.form = QtWidgets.QFormLayout(holder)
+            self.form.setContentsMargins(4, 2, 4, 4)
+            self.form.setSpacing(4)
+            # Right-aligned labels, matching Houdini's parameter layout.
+            self.form.setLabelAlignment(
+                QtCore.Qt.AlignmentFlag.AlignRight
+                | QtCore.Qt.AlignmentFlag.AlignVCenter
+            )
+            self.form.setFieldGrowthPolicy(
+                QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+            )
+            self.body_layout.addWidget(holder)
+        return self.form
+
     def add_row(self, label_widget, editor) -> None:
-        self.form.addRow(label_widget, editor)
+        self._ensure_form().addRow(label_widget, editor)
+
+    def add_group(self, group: "CollapsibleGroup") -> None:
+        self.body_layout.addWidget(group)
 
 
 class ControlsView(QtWidgets.QScrollArea):
@@ -308,6 +338,7 @@ class ControlsView(QtWidgets.QScrollArea):
             QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
         self._editors: Dict[str, Any] = {}
+        self._drawn = 0
         self._inner = QtWidgets.QWidget()
         self._layout = QtWidgets.QVBoxLayout(self._inner)
         self._layout.setContentsMargins(4, 4, 4, 4)
@@ -336,59 +367,73 @@ class ControlsView(QtWidgets.QScrollArea):
         self._layout.insertWidget(0, label)
         self._placeholder = label
 
-    def build(self, groups: List[Dict[str, Any]]) -> int:
-        """Build from grouped control descriptions.
+    def build(self, groups: List[Dict[str, Any]], context: str = "") -> int:
+        """Build from the nested groups grouping.build() produces.
 
-        Each group is {"title", "subtitle", "rows": [row, ...]} and each row is
-        {"entry_id", "label", "parm_type", "value", "spec", "tooltip",
-         "expression"}.
+        Each group is {"name", "path", "count", "groups": [...], "rows": [...]}
+        and each row is {"entry_id", "label", "parm_type", "value", "spec",
+        "tooltip", "expression"}.
         """
         self.clear()
-        drawn = 0
+        self._drawn = 0
         for index, group in enumerate(groups):
-            box = CollapsibleGroup(group.get("title", ""), group.get("subtitle", ""))
-            for row in group.get("rows", []):
-                editor = build_editor(
-                    row.get("parm_type", ""), row.get("value"), row.get("spec")
-                )
-                if editor is None:
-                    continue
-                label = QtWidgets.QLabel(row.get("label", ""))
-                tooltip = row.get("tooltip", "")
-                expression = row.get("expression")
-                if expression:
-                    # Editing an expression-driven parm replaces the
-                    # expression, exactly as dragging its slider in Houdini
-                    # would. Say so up front rather than after the fact.
-                    label_font = label.font()
-                    label_font.setItalic(True)
-                    label.setFont(label_font)
-                    tooltip = (
-                        f"{tooltip}\n\nDriven by an expression:\n  {expression}\n"
-                        "Editing this control replaces it (undoable)."
-                    ).strip()
-                if tooltip:
-                    label.setToolTip(tooltip)
-                    editor.setToolTip(tooltip)
-
-                entry_id = row.get("entry_id", "")
-                editor.valueChanged.connect(
-                    lambda value, key=entry_id: self.edited.emit(key, value)
-                )
-                label.setContextMenuPolicy(
-                    QtCore.Qt.ContextMenuPolicy.CustomContextMenu
-                )
-                label.customContextMenuRequested.connect(
-                    lambda point, key=entry_id, widget=label: self.contextRequested.emit(
-                        key, widget.mapToGlobal(point)
-                    )
-                )
-                box.add_row(label, editor)
-                self._editors[entry_id] = editor
-                drawn += 1
-            self._layout.insertWidget(index, box)
+            # Top level closed: the first thing to see is a short list of
+            # places, not every slider in the scene at once.
+            self._layout.insertWidget(index, self._build_group(group, depth=0))
         self._layout.addStretch(1)
-        return drawn
+        return self._drawn
+
+    def _build_group(self, group: Dict[str, Any], depth: int) -> CollapsibleGroup:
+        box = CollapsibleGroup(
+            group.get("name", ""),
+            group.get("path", ""),
+            count=group.get("count", 0),
+            depth=depth,
+            expanded=depth > 0,
+        )
+        for row in group.get("rows", []):
+            self._add_row(box, row)
+        for child in group.get("groups", []):
+            box.add_group(self._build_group(child, depth + 1))
+        return box
+
+    def _add_row(self, box: CollapsibleGroup, row: Dict[str, Any]) -> None:
+        editor = build_editor(
+            row.get("parm_type", ""), row.get("value"), row.get("spec")
+        )
+        if editor is None:
+            return
+        label = QtWidgets.QLabel(row.get("label", ""))
+        tooltip = row.get("tooltip", "")
+        expression = row.get("expression")
+        if expression:
+            # Editing an expression-driven parm replaces the expression,
+            # exactly as dragging its slider in Houdini would. Say so up
+            # front rather than after the fact.
+            label_font = label.font()
+            label_font.setItalic(True)
+            label.setFont(label_font)
+            tooltip = (
+                f"{tooltip}\n\nDriven by an expression:\n  {expression}\n"
+                "Editing this control replaces it (undoable)."
+            ).strip()
+        if tooltip:
+            label.setToolTip(tooltip)
+            editor.setToolTip(tooltip)
+
+        entry_id = row.get("entry_id", "")
+        editor.valueChanged.connect(
+            lambda value, key=entry_id: self.edited.emit(key, value)
+        )
+        label.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+        label.customContextMenuRequested.connect(
+            lambda point, key=entry_id, widget=label: self.contextRequested.emit(
+                key, widget.mapToGlobal(point)
+            )
+        )
+        box.add_row(label, editor)
+        self._editors[entry_id] = editor
+        self._drawn += 1
 
     # ---- updating -----------------------------------------------------
 

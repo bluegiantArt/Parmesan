@@ -25,7 +25,7 @@ except ImportError:  # pragma: no cover - older Houdini
     from PySide2 import QtCore, QtGui, QtWidgets
 
 from . import diff as diffmod
-from . import promote, scan, scoring, sync, widgets
+from . import grouping, promote, scan, scoring, sync, widgets
 from .manifest import Manifest
 
 try:
@@ -52,7 +52,8 @@ def create():
 
     from . import callbacks, manifest
     for module in (
-        manifest, diffmod, scoring, callbacks, sync, promote, scan, widgets
+        manifest, diffmod, scoring, grouping, callbacks, sync, promote, scan,
+        widgets,
     ):
         importlib.reload(module)
     return ParmesanPanel()
@@ -386,11 +387,12 @@ class ParmesanPanel(QtWidgets.QWidget):
         self.controls.contextRequested.connect(self.on_control_menu)
         layout.addWidget(self.controls, 1)
 
-        hint = QtWidgets.QLabel(
+        self.controls_hint = QtWidgets.QLabel(
             "Right-click a control's name to rename it, jump to its node, or remove it."
         )
-        hint.setStyleSheet("color: palette(mid);")
-        layout.addWidget(hint)
+        self.controls_hint.setStyleSheet("color: palette(mid);")
+        self.controls_hint.setWordWrap(True)
+        layout.addWidget(self.controls_hint)
         return group
 
     # ---- node binding -------------------------------------------------
@@ -762,6 +764,15 @@ class ParmesanPanel(QtWidgets.QWidget):
         for col in range(4):
             self.changes_tree.resizeColumnToContents(col)
 
+    def _grouping_context(self, node) -> Optional[str]:
+        """The network the tree is shown relative to: the scan root if one was
+        typed, else the network the control node lives in."""
+        typed = self.root_edit.text().strip()
+        if typed:
+            return typed
+        parent = node.parent()
+        return parent.path() if parent is not None else None
+
     def _fill_controls(self) -> None:
         """Draw the actual controls, grouped by source node."""
         node = self.node()
@@ -779,23 +790,13 @@ class ParmesanPanel(QtWidgets.QWidget):
             return
 
         rows = promote.live_rows(node, self._manifest)
+        # Group relative to where the scan looked, not to whatever the paths
+        # happen to share: otherwise a graph that all lives down one branch
+        # has its whole hierarchy absorbed into the context and shows flat.
+        context, groups = grouping.build(rows, self._grouping_context(node))
 
-        groups: List[Dict] = []
-        by_heading: Dict[str, Dict] = {}
-        for row in rows:
-            heading = row["folder"] or row["node_name"] or "(ungrouped)"
-            group = by_heading.get(heading)
-            if group is None:
-                group = {
-                    "title": heading,
-                    "subtitle": row["node_path"],
-                    "rows": [],
-                }
-                by_heading[heading] = group
-                groups.append(group)
-            group["rows"].append(row)
-
-        drawn = self.controls.build(groups)
+        drawn = self.controls.build(groups, context)
+        self.controls_hint.setText(grouping.describe(context, groups))
         if drawn == 0:
             self.controls.show_message(
                 "Nothing here can be drawn as a control. "

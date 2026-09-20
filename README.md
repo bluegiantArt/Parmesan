@@ -28,6 +28,7 @@ parmesan/
   manifest.py   schema + persistence   (pure Python)
   diff.py       reconciliation engine + UI wording   (pure Python)
   scoring.py    the ranking heuristic  (pure Python)
+  grouping.py   nesting controls by graph hierarchy  (pure Python)
   scan.py       walks the graph gathering evidence    (needs hou)
   callbacks.py  parm templates + generated callback   (needs hou)
   sync.py       observe / write-through / apply       (needs hou)
@@ -36,7 +37,7 @@ parmesan/
 python_panels/
   parmesan.pypanel   panel registration, path injected at install
 install.py      copies the panel into Houdini's prefs
-tests/          140 tests, no Houdini required
+tests/          161 tests, no Houdini required
 ```
 
 Observation and decision are split on purpose: `sync.observe()` does the
@@ -67,9 +68,16 @@ start raises a `hou.NodeError` naming the problem rather than failing silently.
 
 ## Using the panel
 
-The controls are **in the panel**: value fields, sliders, checkboxes and menus,
-grouped into a collapsible section per source node. Dragging one writes straight
-down into the graph.
+The controls are **in the panel**: value fields, sliders, checkboxes and menus.
+Dragging one writes straight down into the graph.
+
+They are nested the way the network is — `ocean` holding a subnet holding the
+node holding the parameter — because a flat list of three hundred controls is
+no improvement on the graph it came from. Top-level groups start closed, so the
+first thing you see is a short list of places rather than every slider at once,
+and each header carries a count. A level that holds nothing but one other level
+is folded into its parent (`smoke/deep/inner/pyro1`), so no click ever buys you
+nothing.
 
 The same controls also exist as spare parms on the control node, so they render
 as an ordinary Houdini parameter interface in the Parameters pane and keep
