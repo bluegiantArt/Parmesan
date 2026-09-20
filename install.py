@@ -22,6 +22,9 @@ from __future__ import annotations
 import datetime
 import os
 import shutil
+import tempfile
+import urllib.request
+import zipfile
 from typing import List, Optional
 
 try:
@@ -33,6 +36,14 @@ REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 PANEL_SOURCE = os.path.join(REPO_ROOT, "python_panels", "parmesan.pypanel")
 INJECTION_MARKER = "# PARMESAN_PATH_INJECTION"
 ENV_MARKER = "# added by parmesan install.py"
+
+#: Where update() pulls from.
+REPO_ZIP = "https://github.com/bluegiantArt/Parmesan/archive/refs/heads/main.zip"
+
+#: Only these are replaced by an update. Anything else in the folder is left
+#: alone: an update should never be able to delete something it did not put
+#: there, and a stray scene file next to the code is not ours to remove.
+UPDATABLE = ("parmesan", "python_panels", "tests", "install.py", "README.md")
 
 
 def prefs_dir() -> str:
@@ -145,6 +156,97 @@ def _update_env(prefs: str) -> str:
     with open(path, "a", encoding="utf-8") as handle:
         handle.write(f"{suffix}\n{ENV_MARKER}\n{line}\n")
     return note
+
+
+def update(url: str = REPO_ZIP, verbose: bool = True) -> List[str]:
+    """Download the latest code over this folder. Run from inside Houdini:
+
+        import install; install.update()
+
+    Then close and reopen the Parmesan panel -- it reloads its modules on
+    open, so no Houdini restart is needed. Re-run install() only if told the
+    panel file itself changed.
+
+    Local edits to the tracked files are overwritten. Everything not listed in
+    UPDATABLE is left untouched.
+    """
+    report: List[str] = []
+
+    def say(line: str) -> None:
+        report.append(line)
+        if verbose:
+            print(line)
+
+    say(f"Downloading {url}")
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = os.path.join(tmp, "parmesan.zip")
+            urllib.request.urlretrieve(url, archive)
+            extracted = os.path.join(tmp, "extracted")
+            with zipfile.ZipFile(archive) as handle:
+                _safe_extract(handle, extracted)
+            source = _archive_root(extracted)
+            if source is None:
+                say("FAIL The download did not contain a Parmesan folder.")
+                return report
+            changed = _copy_over(source, REPO_ROOT)
+            for name in changed:
+                say(f"  updated {name}")
+            say(f"OK   Updated {len(changed)} item(s) in {REPO_ROOT}")
+    except (OSError, zipfile.BadZipFile, ValueError) as exc:
+        say(f"FAIL Could not update: {exc}")
+        say("     Download the ZIP from GitHub by hand and unzip it over this folder.")
+        return report
+
+    say("")
+    say("Next: close and reopen the Parmesan panel to load the new code.")
+    return report
+
+
+def _safe_extract(handle: zipfile.ZipFile, destination: str) -> None:
+    """Extract, refusing entries that would escape the destination.
+
+    A zip can name ``../../etc/thing``; this one comes from GitHub so it will
+    not, but code that writes files from a downloaded archive should never be
+    the thing that takes the check on trust.
+    """
+    root = os.path.abspath(destination)
+    for member in handle.namelist():
+        target = os.path.abspath(os.path.join(root, member))
+        if not target.startswith(root + os.sep) and target != root:
+            raise ValueError(f"archive entry escapes the destination: {member}")
+    handle.extractall(destination)
+
+
+def _archive_root(extracted: str) -> Optional[str]:
+    """GitHub wraps everything in one folder named after the branch."""
+    entries = [
+        os.path.join(extracted, name)
+        for name in os.listdir(extracted)
+        if os.path.isdir(os.path.join(extracted, name))
+    ]
+    for candidate in [extracted] + entries:
+        if os.path.exists(os.path.join(candidate, "install.py")):
+            return candidate
+    return None
+
+
+def _copy_over(source: str, destination: str) -> List[str]:
+    """Replace the updatable items. Returns what was replaced."""
+    changed: List[str] = []
+    for name in UPDATABLE:
+        incoming = os.path.join(source, name)
+        if not os.path.exists(incoming):
+            continue
+        target = os.path.join(destination, name)
+        if os.path.isdir(incoming):
+            if os.path.isdir(target):
+                shutil.rmtree(target)
+            shutil.copytree(incoming, target)
+        else:
+            shutil.copy2(incoming, target)
+        changed.append(name)
+    return changed
 
 
 def uninstall(verbose: bool = True) -> List[str]:

@@ -131,5 +131,99 @@ class EnvFileEditing(unittest.TestCase):
         self.assertIn("HOUDINI_SPLASH = 0\n", self.read_env())
 
 
+class Updating(unittest.TestCase):
+    """update() writes files from a downloaded archive, so the unpacking half
+    is tested here. The download itself is not: it is one urlretrieve call."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = self._tmp.name
+        self.addCleanup(self._tmp.cleanup)
+
+    def make_archive(self, wrapper="Parmesan-main"):
+        """A GitHub-shaped zip: everything nested under one folder."""
+        import zipfile
+
+        root = os.path.join(self.tmp, "src", wrapper) if wrapper else os.path.join(self.tmp, "src")
+        os.makedirs(os.path.join(root, "parmesan"))
+        with open(os.path.join(root, "install.py"), "w") as handle:
+            handle.write("# new\n")
+        with open(os.path.join(root, "parmesan", "panel.py"), "w") as handle:
+            handle.write("# new panel\n")
+
+        path = os.path.join(self.tmp, "archive.zip")
+        base = os.path.join(self.tmp, "src")
+        with zipfile.ZipFile(path, "w") as handle:
+            for folder, _, files in os.walk(base):
+                for name in files:
+                    full = os.path.join(folder, name)
+                    handle.write(full, os.path.relpath(full, base))
+        return path
+
+    def extract(self, archive):
+        import zipfile
+
+        out = os.path.join(self.tmp, "out")
+        with zipfile.ZipFile(archive) as handle:
+            install._safe_extract(handle, out)
+        return out
+
+    def test_finds_the_folder_github_wraps_everything_in(self):
+        root = install._archive_root(self.extract(self.make_archive()))
+        self.assertIsNotNone(root)
+        self.assertTrue(os.path.exists(os.path.join(root, "install.py")))
+
+    def test_also_copes_with_an_unwrapped_archive(self):
+        root = install._archive_root(self.extract(self.make_archive(wrapper="")))
+        self.assertIsNotNone(root)
+
+    def test_an_archive_without_parmesan_in_it_is_rejected(self):
+        empty = os.path.join(self.tmp, "empty")
+        os.makedirs(empty)
+        self.assertIsNone(install._archive_root(empty))
+
+    def test_copy_replaces_tracked_items(self):
+        root = install._archive_root(self.extract(self.make_archive()))
+        dest = os.path.join(self.tmp, "dest")
+        os.makedirs(dest)
+        changed = install._copy_over(root, dest)
+        self.assertIn("install.py", changed)
+        self.assertIn("parmesan", changed)
+
+    def test_stale_files_inside_a_replaced_package_are_cleared(self):
+        # A module deleted upstream must not linger and keep getting imported.
+        root = install._archive_root(self.extract(self.make_archive()))
+        dest = os.path.join(self.tmp, "dest")
+        os.makedirs(os.path.join(dest, "parmesan"))
+        stale = os.path.join(dest, "parmesan", "removed_upstream.py")
+        with open(stale, "w") as handle:
+            handle.write("old\n")
+        install._copy_over(root, dest)
+        self.assertFalse(os.path.exists(stale))
+
+    def test_files_we_did_not_put_there_are_left_alone(self):
+        # An update must never delete something it does not own -- someone
+        # will keep a scene file next to the code.
+        root = install._archive_root(self.extract(self.make_archive()))
+        dest = os.path.join(self.tmp, "dest")
+        os.makedirs(dest)
+        precious = os.path.join(dest, "my_scene.hip")
+        with open(precious, "w") as handle:
+            handle.write("precious\n")
+        install._copy_over(root, dest)
+        self.assertTrue(os.path.exists(precious))
+
+    def test_an_archive_escaping_its_destination_is_refused(self):
+        import zipfile
+
+        path = os.path.join(self.tmp, "bad.zip")
+        with zipfile.ZipFile(path, "w") as handle:
+            handle.writestr("../escaped.txt", "nope")
+        with zipfile.ZipFile(path) as handle:
+            with self.assertRaises(ValueError):
+                install._safe_extract(handle, os.path.join(self.tmp, "out"))
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "escaped.txt")))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
