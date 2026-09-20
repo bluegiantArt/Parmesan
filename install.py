@@ -229,6 +229,14 @@ def update_from(path: str, verbose: bool = True) -> List[str]:
         say(f"FAIL Nothing found at {path}")
         return report
 
+    # A download folder is a fair thing to point at: nobody should have to
+    # retype a filename that changes every time the browser adds " (1)".
+    if os.path.isdir(path) and not os.path.exists(os.path.join(path, "install.py")):
+        newest = _newest_archive(path)
+        if newest:
+            say(f"Newest Parmesan archive in that folder: {os.path.basename(newest)}")
+            path = newest
+
     say(f"Updating {REPO_ROOT}")
     say(f"    from {path}")
     try:
@@ -258,6 +266,26 @@ def update_from(path: str, verbose: bool = True) -> List[str]:
     say("")
     say("Next: close and reopen the Parmesan panel to load the new code.")
     return report
+
+
+def _newest_archive(folder: str) -> Optional[str]:
+    """The most recent Parmesan zip in a download folder.
+
+    Browsers rename repeat downloads ("Parmesan-main (3).zip"), so the newest
+    match wins rather than an exact name. This is what lets the update command
+    be one fixed line that never needs editing.
+    """
+    candidates = []
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return None
+    for name in names:
+        if name.lower().startswith("parmesan") and name.lower().endswith(".zip"):
+            candidates.append(os.path.join(folder, name))
+    if not candidates:
+        return None
+    return max(candidates, key=os.path.getmtime)
 
 
 def _safe_extract(handle: zipfile.ZipFile, destination: str) -> None:

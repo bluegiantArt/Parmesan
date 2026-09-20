@@ -9,6 +9,7 @@ These run against a temporary directory; no Houdini required.
 """
 
 import os
+import shutil
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
@@ -256,6 +257,43 @@ class Updating(unittest.TestCase):
         archive = self.make_archive()
         root, report = self.run_update_from(f'"{archive}"')
         self.assertTrue(os.path.exists(os.path.join(root, "parmesan", "panel.py")))
+
+    def test_pointing_at_a_download_folder_picks_the_newest_zip(self):
+        # The update command should be one fixed line. Browsers rename repeat
+        # downloads, so an exact filename would need editing every time.
+        import time
+
+        downloads = os.path.join(self.tmp, "downloads")
+        os.makedirs(downloads)
+        archive = self.make_archive()
+        for name, age in (
+            ("Parmesan-main.zip", 900),
+            ("Parmesan-main (1).zip", 600),
+            ("Parmesan-main (2).zip", 5),
+        ):
+            target = os.path.join(downloads, name)
+            shutil.copy2(archive, target)
+            os.utime(target, (time.time() - age, time.time() - age))
+
+        self.assertEqual(
+            os.path.basename(install._newest_archive(downloads)),
+            "Parmesan-main (2).zip",
+        )
+        root, report = self.run_update_from(downloads)
+        self.assertTrue(os.path.exists(os.path.join(root, "parmesan", "panel.py")))
+        self.assertTrue(any("Newest Parmesan archive" in line for line in report))
+
+    def test_a_folder_with_no_archives_returns_nothing(self):
+        empty = os.path.join(self.tmp, "empty")
+        os.makedirs(empty)
+        self.assertIsNone(install._newest_archive(empty))
+
+    def test_unrelated_zips_in_the_folder_are_ignored(self):
+        downloads = os.path.join(self.tmp, "downloads2")
+        os.makedirs(downloads)
+        with open(os.path.join(downloads, "textures.zip"), "w") as handle:
+            handle.write("not ours\n")
+        self.assertIsNone(install._newest_archive(downloads))
 
     def test_a_missing_path_fails_clearly(self):
         _, report = self.run_update_from(os.path.join(self.tmp, "nope.zip"))
