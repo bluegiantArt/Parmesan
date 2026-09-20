@@ -281,12 +281,26 @@ class ParmesanPanel(QtWidgets.QWidget):
         self.scan_btn.clicked.connect(self.on_scan)
         scan_row.addWidget(self.scan_btn, 1)
 
-        scan_row.addWidget(QtWidgets.QLabel("How many:"))
-        self.count_spin = QtWidgets.QSpinBox()
-        self.count_spin.setRange(1, 200)
-        self.count_spin.setValue(scoring.DEFAULT_LIMIT)
-        self.count_spin.setToolTip("How many controls to surface")
-        scan_row.addWidget(self.count_spin)
+        scan_row.addWidget(QtWidgets.QLabel("How much:"))
+        # A quality bar, not a count. "Top 12" drops parameters with exactly
+        # as much evidence as the ones that made the cut, and no one can
+        # justify the 12.
+        self.level_combo = QtWidgets.QComboBox()
+        for key, settings in scoring.LEVELS.items():
+            self.level_combo.addItem(settings["label"], key)
+            self.level_combo.setItemData(
+                self.level_combo.count() - 1,
+                settings["hint"],
+                QtCore.Qt.ItemDataRole.ToolTipRole,
+            )
+        self.level_combo.setCurrentIndex(
+            list(scoring.LEVELS).index(scoring.DEFAULT_LEVEL)
+        )
+        self.level_combo.setToolTip(
+            "How strong the evidence has to be before a parameter is surfaced.\n"
+            "Everything above the bar is surfaced -- there is no fixed count."
+        )
+        scan_row.addWidget(self.level_combo)
 
         self.review_check = QtWidgets.QCheckBox("Review first")
         self.review_check.setToolTip(
@@ -466,18 +480,23 @@ class ParmesanPanel(QtWidgets.QWidget):
         if root is None:
             return
 
+        level = self.level_combo.currentData() or scoring.DEFAULT_LEVEL
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
         try:
-            ranked, report = scan.propose(
-                node, root=root, limit=self.count_spin.value()
-            )
+            ranked, report = scan.propose(node, root=root, level=level)
         finally:
             QtWidgets.QApplication.restoreOverrideCursor()
 
+        if report.interrupted:
+            # Escaped deliberately: nothing is surfaced, because a half-read
+            # graph would rank against evidence that was never gathered.
+            self._say(f"Scan stopped. {report.summary()}. Nothing was added.")
+            return
+
         if not ranked:
             self._say(
-                f"{report.summary()}, but nothing scored high enough. "
-                "Try editing a few parameters first, or use Add Manually."
+                f"{report.summary()}, but nothing cleared the evidence bar. "
+                "Try a lower setting in 'How much', or use Add Manually."
             )
             return
 
@@ -502,13 +521,10 @@ class ParmesanPanel(QtWidgets.QWidget):
             added, problems = promote.promote_candidates(node, chosen)
 
         self.reload()
-        self._say(
-            _join(
-                f"Surfaced {len(added)} of {scoring.summarize(ranked)}. "
-                f"{report.summary()}.",
-                problems + report.errors,
-            )
-        )
+        note = f"Surfaced {len(added)} of {scoring.summarize(ranked)}. {report.summary()}."
+        if len(added) > scoring.LARGE_PANEL:
+            note += " That is a big panel -- try 'Just the essentials' for fewer."
+        self._say(_join(note, problems + report.errors))
 
     def on_add(self) -> None:
         node = self._need_node()

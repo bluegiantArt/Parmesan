@@ -14,6 +14,7 @@ sitting at its default with a plumbing name is not worth a reference walk.
 
 from __future__ import annotations
 
+import contextlib
 from typing import Any, Dict, List, Optional
 
 from . import promote, scoring, sync
@@ -35,6 +36,11 @@ MAX_NODES = 3000
 MAX_PARMS_PER_NODE = 200
 
 
+#: How often to report progress. Every node would spend more time drawing a
+#: progress bar than reading parms.
+PROGRESS_EVERY = 25
+
+
 class ScanReport:
     """What a scan found, plus what it had to give up on."""
 
@@ -43,6 +49,7 @@ class ScanReport:
         self.nodes_visited = 0
         self.parms_examined = 0
         self.truncated = False
+        self.interrupted = False
         self.errors: List[str] = []
 
     def summary(self) -> str:
@@ -50,11 +57,36 @@ class ScanReport:
             f"Looked at {self.parms_examined} parameters on "
             f"{self.nodes_visited} nodes"
         )
+        if self.interrupted:
+            line += " (stopped early)"
         if self.truncated:
             line += f" (stopped at the {MAX_NODES}-node limit)"
         if self.errors:
             line += f"; {len(self.errors)} node(s) could not be read"
         return line
+
+
+def _interrupted_error():
+    """Houdini's escape exception, or a type nothing raises where absent."""
+    return getattr(hou, "OperationInterrupted", ()) if hou is not None else ()
+
+
+@contextlib.contextmanager
+def _escapable(title: str):
+    """A progress operation that Escape can cancel.
+
+    A scan with no count limit can cross a whole production scene, and an
+    artist who realises they pointed it at the wrong network should not have
+    to wait it out. Degrades to a plain no-op where the API is unavailable,
+    so the scan still runs, just without a way to stop it.
+    """
+    if hou is None or not hasattr(hou, "InterruptableOperation"):
+        yield None
+        return
+    with hou.InterruptableOperation(
+        title, long_operation_name=title, open_interrupt_dialog=True
+    ) as operation:
+        yield operation
 
 
 def _require_hou() -> None:
@@ -128,16 +160,25 @@ def scan(
 
     nodes = walk(root)
     report.truncated = len(nodes) >= MAX_NODES
+    total = float(len(nodes)) or 1.0
 
-    for node in nodes:
-        if skip_path is not None and node.path() == skip_path:
-            continue
-        try:
-            report.candidates.extend(_scan_node(node, bound, report))
-            report.nodes_visited += 1
-        except hou.OperationFailed as exc:
-            # One unreadable node must not abort a scan of three thousand.
-            report.errors.append(f"{node.path()}: {exc}")
+    try:
+        with _escapable("Scanning graph") as operation:
+            for index, node in enumerate(nodes):
+                # Escape raises out of updateProgress, so the partial result
+                # is kept and reported rather than thrown away.
+                if operation is not None and index % PROGRESS_EVERY == 0:
+                    operation.updateProgress(index / total)
+                if skip_path is not None and node.path() == skip_path:
+                    continue
+                try:
+                    report.candidates.extend(_scan_node(node, bound, report))
+                    report.nodes_visited += 1
+                except hou.OperationFailed as exc:
+                    # One unreadable node must not abort a scan of three thousand.
+                    report.errors.append(f"{node.path()}: {exc}")
+    except _interrupted_error():
+        report.interrupted = True
 
     return report
 
@@ -194,26 +235,16 @@ def _scan_node(node, bound: set, report: ScanReport) -> List[Dict[str, Any]]:
     return out
 
 
-def propose(
-    panel_node,
-    root=None,
-    limit: Optional[int] = scoring.DEFAULT_LIMIT,
-    min_score: float = scoring.MIN_SCORE,
-    max_per_node: Optional[int] = scoring.DEFAULT_MAX_PER_NODE,
-):
+def propose(panel_node, root=None, level: str = scoring.DEFAULT_LEVEL):
     """Scan and rank in one call. Returns (ranked, report).
 
-    This is what the panel's one-click action runs.
+    This is what the panel's one-click action runs. How much comes back is
+    decided by the evidence bar of ``level``, not by a count.
     """
     _require_hou()
     if root is None:
         root = default_root(panel_node)
     manifest = sync.load_manifest(panel_node)
     report = scan(root, manifest, skip_node=panel_node)
-    ranked = scoring.rank(
-        report.candidates,
-        limit=limit,
-        min_score=min_score,
-        max_per_node=max_per_node,
-    )
+    ranked = scoring.rank_at(report.candidates, level)
     return ranked, report

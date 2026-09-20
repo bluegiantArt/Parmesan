@@ -64,16 +64,47 @@ W_LOCKED = -6.0
 #: Greyed out by a conditional, so it does nothing in the current state.
 W_DISABLED = -2.0
 
-#: Below this, a candidate is not worth a slot even if nothing else competes.
+#: Below this, there is no real evidence the parameter matters. A candidate
+#: under it is not "ranked lower", it is unevidenced.
 MIN_SCORE = 3.0
 
-#: Default size of an auto-surfaced panel. Enough to be useful, few enough to
-#: read at a glance.
-DEFAULT_LIMIT = 12
+#: How much to surface, as a quality bar rather than a count.
+#:
+#: A fixed "top N" is the wrong control: N is a number nobody can justify, and
+#: it silently drops parameters that are every bit as meaningful as the ones
+#: above the cut. What an artist actually wants to say is how strong the
+#: evidence has to be, so that is what these offer. The count then falls out
+#: of the graph rather than being imposed on it.
+#:
+#: ``per_node`` still caps any single node, because one heavily-tweaked node
+#: with forty edited parms would otherwise bury every other node's one
+#: important knob. None means no cap.
+LEVELS = {
+    "essentials": {
+        "label": "Just the essentials",
+        "min_score": 9.0,
+        "per_node": 2,
+        "hint": "Only parameters with strong, corroborated evidence.",
+    },
+    "recommended": {
+        "label": "Recommended",
+        "min_score": 6.0,
+        "per_node": 4,
+        "hint": "Edited parameters with something else backing them up.",
+    },
+    "everything": {
+        "label": "Everything meaningful",
+        "min_score": MIN_SCORE,
+        "per_node": None,
+        "hint": "Every parameter with any real evidence behind it.",
+    },
+}
 
-#: No single node may fill the panel: a heavily-tweaked node would otherwise
-#: crowd out every other node's one important knob.
-DEFAULT_MAX_PER_NODE = 4
+DEFAULT_LEVEL = "recommended"
+
+#: Above this the panel says so in its status line -- a note, not a prompt.
+#: Interrupting someone to confirm a number they can already see is noise.
+LARGE_PANEL = 60
 
 
 # --------------------------------------------------------------------------
@@ -293,11 +324,29 @@ def score(candidate: Dict[str, Any]) -> Tuple[float, List[str]]:
     return points, reasons
 
 
+def level_settings(level: str) -> Dict[str, Any]:
+    """Look up a named level, falling back to the default rather than raising."""
+    return LEVELS.get(level, LEVELS[DEFAULT_LEVEL])
+
+
+def rank_at(
+    candidates: List[Dict[str, Any]], level: str = DEFAULT_LEVEL
+) -> List[Dict[str, Any]]:
+    """Rank at a named level. No count limit: the quality bar decides."""
+    settings = level_settings(level)
+    return rank(
+        candidates,
+        limit=None,
+        min_score=settings["min_score"],
+        max_per_node=settings["per_node"],
+    )
+
+
 def rank(
     candidates: List[Dict[str, Any]],
-    limit: Optional[int] = DEFAULT_LIMIT,
+    limit: Optional[int] = None,
     min_score: float = MIN_SCORE,
-    max_per_node: Optional[int] = DEFAULT_MAX_PER_NODE,
+    max_per_node: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Score, filter and order candidates for surfacing.
 
@@ -305,8 +354,10 @@ def rank(
     node path then parm name so the same graph always ranks the same way --
     a panel that reshuffles itself between identical scans looks broken.
 
-    ``max_per_node`` is applied before ``limit``: the cap exists so a panel
-    built from one over-tweaked node still has room for the rest of the graph.
+    ``limit`` defaults to None: capping at an arbitrary count would drop
+    parameters with exactly as much evidence as the ones that made the cut.
+    ``max_per_node`` is applied first, so a cap that is set still leaves room
+    for the rest of the graph.
     """
     scored: List[Dict[str, Any]] = []
     for candidate in candidates:

@@ -176,7 +176,16 @@ class Ranking(unittest.TestCase):
         ranked = scoring.rank([weak, strong])
         self.assertEqual(ranked[0]["node_path"], "/obj/b")
 
-    def test_limit_caps_the_panel_size(self):
+    def test_nothing_is_dropped_for_being_past_an_arbitrary_count(self):
+        # Forty parms with identical evidence: a "top 12" would keep twelve of
+        # them and silently bin twenty-eight that are exactly as well
+        # evidenced. The quality bar decides, not a number.
+        many = [
+            cand(node_path=f"/obj/n{i}", edited=True, animated=True) for i in range(40)
+        ]
+        self.assertEqual(len(scoring.rank(many)), 40)
+
+    def test_an_explicit_limit_is_still_honoured(self):
         many = [
             cand(node_path=f"/obj/n{i}", edited=True, animated=True) for i in range(40)
         ]
@@ -230,6 +239,79 @@ class Ranking(unittest.TestCase):
 
     def test_summary_of_nothing_says_so(self):
         self.assertIn("Nothing", scoring.summarize([]))
+
+
+class Levels(unittest.TestCase):
+    """How much to surface is a quality bar, not a count."""
+
+    def graph(self, size=10):
+        """Three tiers of evidence, so the levels have something to separate."""
+        strong = [
+            # Edited, animated, on a node someone named, referenced elsewhere.
+            cand(
+                node_path=f"/obj/strong{i}", source_parm="height", edited=True,
+                animated=True, node_renamed=True, referenced_count=3,
+            )
+            for i in range(size)
+        ]
+        middling = [
+            # Edited, with a knob-like name and nothing else behind it.
+            cand(node_path=f"/obj/mid{i}", source_parm="height", edited=True)
+            for i in range(size)
+        ]
+        faint = [
+            # Never edited; only a renamed node and a promising name.
+            cand(node_path=f"/obj/faint{i}", source_parm="height", node_renamed=True)
+            for i in range(size)
+        ]
+        return strong + middling + faint
+
+    def test_every_level_is_configured(self):
+        for key, settings in scoring.LEVELS.items():
+            self.assertTrue(settings["label"], f"{key} has no label")
+            self.assertTrue(settings["hint"], f"{key} has no hint")
+            self.assertIsInstance(settings["min_score"], float)
+
+    def test_the_default_level_exists(self):
+        self.assertIn(scoring.DEFAULT_LEVEL, scoring.LEVELS)
+
+    def test_stricter_levels_surface_less(self):
+        graph = self.graph()
+        counts = {
+            key: len(scoring.rank_at(graph, key)) for key in scoring.LEVELS
+        }
+        self.assertLess(counts["essentials"], counts["recommended"])
+        self.assertLess(counts["recommended"], counts["everything"])
+
+    def test_everything_meaningful_has_no_per_node_cap(self):
+        # A node with twenty well-evidenced parms should give all twenty at
+        # the loosest setting; capping there would contradict the label.
+        hoggish = [
+            cand(node_path="/obj/hog", source_parm=f"height{i}", edited=True,
+                 animated=True, node_renamed=True)
+            for i in range(20)
+        ]
+        self.assertEqual(len(scoring.rank_at(hoggish, "everything")), 20)
+
+    def test_tighter_levels_still_cap_a_single_node(self):
+        hoggish = [
+            cand(node_path="/obj/hog", source_parm=f"height{i}", edited=True,
+                 animated=True, node_renamed=True, referenced_count=3)
+            for i in range(20)
+        ]
+        self.assertEqual(len(scoring.rank_at(hoggish, "essentials")), 2)
+
+    def test_unevidenced_parms_are_excluded_at_every_level(self):
+        plumbing = [cand(source_parm="group", type_name="merge")]
+        for key in scoring.LEVELS:
+            self.assertEqual(scoring.rank_at(plumbing, key), [], f"at {key}")
+
+    def test_an_unknown_level_falls_back_instead_of_raising(self):
+        graph = self.graph(5)
+        self.assertEqual(
+            len(scoring.rank_at(graph, "nonsense")),
+            len(scoring.rank_at(graph, scoring.DEFAULT_LEVEL)),
+        )
 
 
 class RealisticGraph(unittest.TestCase):

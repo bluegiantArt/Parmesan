@@ -36,7 +36,7 @@ parmesan/
 python_panels/
   parmesan.pypanel   panel registration, path injected at install
 install.py      copies the panel into Houdini's prefs
-tests/          89 tests, no Houdini required
+tests/          140 tests, no Houdini required
 ```
 
 Observation and decision are split on purpose: `sync.observe()` does the
@@ -67,9 +67,13 @@ start raises a `hou.NodeError` naming the problem rather than failing silently.
 
 ## Using the panel
 
-The panel is the machinery; **the sliders are not in it.** They are spare parms
-on the control node, so they render as an ordinary Houdini parameter interface
-in the Parameters pane, and they keep working when the panel is closed.
+The controls are **in the panel**: value fields, sliders, checkboxes and menus,
+grouped into a collapsible section per source node. Dragging one writes straight
+down into the graph.
+
+The same controls also exist as spare parms on the control node, so they render
+as an ordinary Houdini parameter interface in the Parameters pane and keep
+working when the panel is closed.
 
 1. Select a node in the network editor and press **Create New** — that makes a
    `CONTROLS` null to hang controls on. (**Use Selected** adopts an existing
@@ -78,17 +82,29 @@ in the Parameters pane, and they keep working when the panel is closed.
    root, ranks every parameter in it, and surfaces the best ones — grouped into
    one collapsible folder per source node, so it is always obvious which node a
    knob came from. No node-by-node hunting; that is the point of the tool.
-3. **Show Controls** makes the control node current so the sliders appear in
-   the Parameters pane. Dragging one writes straight down into the graph.
+3. Drag a slider. It writes into the graph immediately. **Show Controls** makes
+   the control node current if you would rather work in the Parameters pane.
+   Right-click a control's name to rename it, jump to its node, or remove it.
 4. Change something on a source node directly, then press **Refresh**. The
    count on the button is how many things need your attention. Rows say what
    happened in plain words; **Apply Checked** acts on them. Conflicts ask once
    which side wins rather than guessing.
 
 **Scan from** limits the scan; blank means the network the control node lives
-in, which is usually what you want. **How many** sets the panel size.
-**Review first** shows the ranking before anything is added — off by default,
-because one press should give a working panel.
+in, which is usually what you want. **Review first** shows the ranking before
+anything is added — off by default, because one press should give a working
+panel. A long scan can be stopped with Escape; nothing is added if you do.
+
+**How much** is a quality bar, not a count. There is no "top N" — everything
+with enough evidence behind it is surfaced, however many that turns out to be,
+because a fixed count drops parameters that are every bit as well evidenced as
+the ones above the line:
+
+| Setting | Surfaces |
+|---|---|
+| Just the essentials | Only strong, corroborated evidence; at most 2 per node |
+| Recommended | Edited parameters with something else backing them up |
+| Everything meaningful | Anything with real evidence behind it, no per-node cap |
 
 Every surfaced control records *why* it was chosen, shown in the panel's list.
 If the ranking picks badly, that column is the diagnostic: it says which signal
@@ -118,8 +134,13 @@ everything else corroborates:
 The fan-out cap sits deliberately below the edited weight, so no amount of
 corroboration outranks direct evidence. An unknown node type scores zero rather
 than being penalised, so a graph of custom HDAs falls back to evidence instead
-of being punished for being unrecognised. And no single node may take more than
-`DEFAULT_MAX_PER_NODE` slots, so one over-tweaked node cannot fill the panel.
+of being punished for being unrecognised. At the tighter levels a per-node cap
+stops one over-tweaked node filling the panel; at "Everything meaningful" there
+is no cap, because a node with twenty well-evidenced parms has twenty of them.
+
+A control driven by an expression is shown in italic and says so in its tooltip.
+Editing it replaces the expression, which is what dragging its slider in Houdini
+does anyway -- but inside an undo group, and with warning beforehand.
 
 ## Tests
 
